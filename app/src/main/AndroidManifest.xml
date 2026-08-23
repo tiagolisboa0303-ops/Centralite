@@ -37,8 +37,31 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".SyncStateReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".SyncSleepReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".ChargeRestoreReceiver"
+            android:exported="false" />
+
         <activity
             android:name=".AppsActivity"
+            android:screenOrientation="landscape"
+            android:exported="false" />
+
+        <activity
+            android:name=".ChargeDiagnosticActivity"
             android:screenOrientation="landscape"
             android:exported="false" />
 

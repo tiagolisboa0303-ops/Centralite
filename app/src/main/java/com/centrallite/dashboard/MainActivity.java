@@ -64,7 +64,6 @@ public class MainActivity extends Activity implements LocationListener {
     private FrameLayout root;
     private DashboardView dashboard;
     private CarMotionView carMotion;
-    private FordSplashView fordSplash;
     private FrameLayout mapCard;
     private MapView miniMap;
     private Marker mapMarker;
@@ -86,7 +85,7 @@ public class MainActivity extends Activity implements LocationListener {
     private ComponentName deviceAdminComponent;
     private boolean parkingMode = false;
     private boolean adminPromptScheduled = false;
-    private long lastStartupSequenceAt = 0L;
+    private boolean syncTriggeredParking = false;
 
     private final Runnable parkingRunnable = new Runnable() {
         @Override public void run() {
@@ -109,10 +108,6 @@ public class MainActivity extends Activity implements LocationListener {
 
         carMotion = new CarMotionView(this);
         root.addView(carMotion, new FrameLayout.LayoutParams(1, 1));
-
-        fordSplash = new FordSplashView(this);
-        root.addView(fordSplash, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
         setupMiniMap();
@@ -147,10 +142,16 @@ public class MainActivity extends Activity implements LocationListener {
                 @Override public void run() { handleIgnitionOff(); }
             }, 150);
         }
-
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { playStartupSequence(); }
-        }, 350);
+        if (getIntent() != null && getIntent().getBooleanExtra("wake_from_sync", false)) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { handleSyncWake(); }
+            }, 150);
+        }
+        if (getIntent() != null && getIntent().getBooleanExtra("shutdown_from_sync", false)) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { handleSyncOff(); }
+            }, 150);
+        }
     }
 
     @Override
@@ -162,6 +163,12 @@ public class MainActivity extends Activity implements LocationListener {
         }
         if (intent != null && intent.getBooleanExtra("shutdown_from_power", false)) {
             handleIgnitionOff();
+        }
+        if (intent != null && intent.getBooleanExtra("wake_from_sync", false)) {
+            handleSyncWake();
+        }
+        if (intent != null && intent.getBooleanExtra("shutdown_from_sync", false)) {
+            handleSyncOff();
         }
     }
 
@@ -224,17 +231,35 @@ public class MainActivity extends Activity implements LocationListener {
                 dashboard.battery = scale > 0 ? Math.round(level * 100f / scale) : 0;
                 dashboard.charging = chargingNow;
 
+                // While parked by the SYNC signal, the permanently powered 12 V socket
+                // must not wake the dashboard again through BATTERY_CHANGED.
+                if (syncTriggeredParking) {
+                    lastChargingState = chargingNow;
+                    dashboard.invalidate();
+                    return;
+                }
+
                 // We use external power as the practical ignition signal for this tablet setup.
                 if (lastChargingState == null) {
                     lastChargingState = chargingNow;
                     if (chargingNow) {
-                        playStartupSequence();
+                        exitParkingMode();
+                        if (carMotion != null) carMotion.startIgnitionAnimation();
+                        handler.postDelayed(new Runnable() {
+                            @Override public void run() { autoConnectSync(false); }
+                        }, 900);
+                        scheduleStartupGreeting();
                     }
                 } else if (lastChargingState != chargingNow) {
                     boolean wasCharging = lastChargingState;
                     lastChargingState = chargingNow;
                     if (!wasCharging && chargingNow) {
-                        playStartupSequence();
+                        exitParkingMode();
+                        if (carMotion != null) carMotion.startIgnitionAnimation();
+                        handler.postDelayed(new Runnable() {
+                            @Override public void run() { autoConnectSync(false); }
+                        }, 900);
+                        scheduleStartupGreeting();
                     } else if (wasCharging && !chargingNow) {
                         handleIgnitionOff();
                     }
@@ -344,10 +369,20 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void handleIgnitionOff() {
+        handleIgnitionOff(false);
+    }
+
+    private void handleSyncOff() {
+        if (parkingMode) return;
+        syncTriggeredParking = true;
+        handleIgnitionOff(true);
+    }
+
+    private void handleIgnitionOff(boolean fromSync) {
         long now = SystemClock.uptimeMillis();
         if (lastShutdownSequenceAt != 0L && now - lastShutdownSequenceAt < 2500L) return;
         lastShutdownSequenceAt = now;
-        lastChargingState = false;
+        if (!fromSync) lastChargingState = false;
         handler.removeCallbacks(parkingRunnable);
         if (carMotion != null) {
             carMotion.startAnimations();
@@ -377,8 +412,19 @@ public class MainActivity extends Activity implements LocationListener {
         if (carMotion != null) carMotion.stopAnimations();
         if (dashboard != null) dashboard.stopAnimations();
 
-        // Let the shutdown sound finish over SYNC, then turn Bluetooth off for parking.
-        if (bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
+        if (syncTriggeredParking) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    if (ChargePrefs.isEnabled(MainActivity.this)) {
+                        PowerControl.setInputEnabled(false);
+                    }
+                }
+            }, "CentralLiteChargeOff").start();
+        }
+
+        // If SYNC is our ignition signal, Bluetooth must stay on so it can detect
+        // the car returning. Power-triggered parking keeps the previous behaviour.
+        if (!syncTriggeredParking && bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
             try { bluetoothAdapter.disable(); } catch (Exception ignored) { }
         }
 
@@ -395,14 +441,28 @@ public class MainActivity extends Activity implements LocationListener {
             } catch (Exception ignored) { }
         }
 
-        // Fallback if Device Administrator was not enabled: dim heavily instead of staying bright.
+        // Without Device Administrator, root can still press the virtual power key.
+        // Dim immediately while the background command runs.
         try {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
             lp.screenBrightness = 0.02f;
             getWindow().setAttributes(lp);
-            Toast.makeText(this, "Ative Administrador do dispositivo para apagar a tela automaticamente.",
-                    Toast.LENGTH_LONG).show();
         } catch (Exception ignored) { }
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final boolean screenOff = PowerControl.turnScreenOff();
+                if (!screenOff) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            Toast.makeText(MainActivity.this,
+                                    "Ative Administrador ou root para apagar a tela automaticamente.",
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
+                }
+            }
+        }, "CentralLiteScreenOff").start();
     }
 
     private void exitParkingMode() {
@@ -434,6 +494,24 @@ public class MainActivity extends Activity implements LocationListener {
         }, 1800);
     }
 
+    private void handleSyncWake() {
+        syncTriggeredParking = false;
+        lastChargingState = true;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                if (ChargePrefs.isEnabled(MainActivity.this)) {
+                    PowerControl.setInputEnabled(true);
+                }
+            }
+        }, "CentralLiteChargeOn").start();
+        handleIgnitionWake();
+        if (carMotion != null) carMotion.startIgnitionAnimation();
+        scheduleStartupGreeting();
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { updateSyncStatus(); }
+        }, 800);
+    }
+
     private void handleIgnitionWake() {
         // On Android 5.1 these flags allow the dedicated car dashboard to appear immediately
         // after power returns. A secure PIN/pattern can still require the user's unlock.
@@ -443,7 +521,7 @@ public class MainActivity extends Activity implements LocationListener {
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } catch (Exception ignored) { }
-        playStartupSequence();
+        exitParkingMode();
         enterImmersiveMode();
         handler.postDelayed(new Runnable() {
             @Override public void run() {
@@ -451,27 +529,6 @@ public class MainActivity extends Activity implements LocationListener {
                 catch (Exception ignored) { }
             }
         }, 2200);
-    }
-
-    private void playStartupSequence() {
-        long now = SystemClock.uptimeMillis();
-        if (lastStartupSequenceAt != 0L && now - lastStartupSequenceAt < 3500L) return;
-        lastStartupSequenceAt = now;
-
-        exitParkingMode();
-        if (fordSplash != null) fordSplash.play();
-        handler.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (carMotion != null) carMotion.startIgnitionAnimation();
-                if (dashboard != null) dashboard.startIgnitionAnimation();
-            }
-        }, 1650);
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { autoConnectSync(false); }
-        }, 1050);
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { scheduleStartupGreeting(); }
-        }, 1700);
     }
 
     private void initVoiceAssistant() {
@@ -979,85 +1036,6 @@ public class MainActivity extends Activity implements LocationListener {
         }
     }
 
-    private class FordSplashView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-        private final Rect src = new Rect();
-        private final RectF dst = new RectF();
-        private Bitmap logoBitmap;
-        private boolean showing = false;
-        private long startedAt = 0L;
-
-        FordSplashView(Context context) {
-            super(context);
-            setVisibility(View.GONE);
-            setClickable(false);
-            logoBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.ford_logo_start);
-            if (logoBitmap != null) src.set(0, 0, logoBitmap.getWidth(), logoBitmap.getHeight());
-        }
-
-        private final Runnable frameTick = new Runnable() {
-            @Override public void run() {
-                if (!showing) return;
-                invalidate();
-                if (SystemClock.uptimeMillis() - startedAt >= 2500L) {
-                    showing = false;
-                    setVisibility(View.GONE);
-                    return;
-                }
-                postDelayed(this, 40);
-            }
-        };
-
-        void play() {
-            showing = true;
-            startedAt = SystemClock.uptimeMillis();
-            setVisibility(View.VISIBLE);
-            bringToFront();
-            removeCallbacks(frameTick);
-            post(frameTick);
-            invalidate();
-        }
-
-        @Override
-        protected void onDraw(Canvas c) {
-            super.onDraw(c);
-            if (!showing) return;
-            int w = getWidth(), h = getHeight();
-            float elapsed = SystemClock.uptimeMillis() - startedAt;
-            float alpha;
-            if (elapsed < 280f) alpha = elapsed / 280f;
-            else if (elapsed > 2150f) alpha = Math.max(0f, 1f - ((elapsed - 2150f) / 350f));
-            else alpha = 1f;
-            float scale = 0.92f + Math.min(1f, elapsed / 550f) * 0.08f;
-
-            paint.setColor(Color.argb((int)(230 * alpha), 6, 10, 18));
-            c.drawRect(0, 0, w, h, paint);
-
-            float cx = w * 0.50f;
-            float cy = h * 0.43f;
-            float logoW = w * 0.62f * scale;
-            float logoH = logoW * 0.44f;
-
-            paint.setColor(Color.argb((int)(52 * alpha), 90, 160, 255));
-            c.drawOval(new RectF(cx - logoW * 0.63f, cy - logoH * 0.72f,
-                    cx + logoW * 0.63f, cy + logoH * 0.72f), paint);
-
-            if (logoBitmap != null) {
-                dst.set(cx - logoW / 2f, cy - logoH / 2f, cx + logoW / 2f, cy + logoH / 2f);
-                paint.setAlpha((int)(255 * alpha));
-                c.drawBitmap(logoBitmap, src, dst, paint);
-                paint.setAlpha(255);
-            }
-
-            text.setTextAlign(Paint.Align.CENTER);
-            text.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
-            text.setTextSize(h * 0.040f);
-            text.setColor(Color.argb((int)(215 * alpha), 220, 228, 240));
-            c.drawText("Central Fusion", cx, cy + logoH * 0.78f + h * 0.04f, text);
-        }
-    }
-
     private class DashboardView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
@@ -1411,12 +1389,12 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.032f);
             text.setColor(Color.WHITE);
-            c.drawText("Música", cx, r.top + r.height() * 0.76f, text);
+            c.drawText("YouTube", cx, r.top + r.height() * 0.76f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.019f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("NewPipe", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Música • NewPipe", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawCarAnimation(Canvas c, int w, int h) {
@@ -1456,6 +1434,8 @@ public class MainActivity extends Activity implements LocationListener {
                     // Configurações continuam acessíveis: segure Aplicativos por ~0,7 s.
                     if (button == 6 && held >= 650) {
                         startActivity(new Intent(Settings.ACTION_SETTINGS));
+                    } else if (button == 2 && held >= 650) {
+                        startActivity(new Intent(MainActivity.this, ChargeDiagnosticActivity.class));
                     } else {
                         handleButton(button);
                     }
