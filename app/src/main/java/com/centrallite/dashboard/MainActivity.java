@@ -24,6 +24,9 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.Uri;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -37,11 +40,13 @@ import android.view.WindowManager;
 import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.speech.tts.TextToSpeech;
 
 import java.io.File;
 import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.Calendar;
 import java.util.Locale;
 import java.util.Set;
 
@@ -67,6 +72,11 @@ public class MainActivity extends Activity implements LocationListener {
     private BluetoothAdapter bluetoothAdapter;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Boolean lastChargingState = null;
+    private TextToSpeech tts;
+    private boolean ttsReady = false;
+    private boolean greetingPending = false;
+    private long lastGreetingAt = 0L;
+    private MediaPlayer shutdownPlayer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,6 +98,7 @@ public class MainActivity extends Activity implements LocationListener {
         setupMiniMap();
         positionOverlayViews();
         enterImmersiveMode();
+        initVoiceAssistant();
 
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         startBluetoothMonitor();
@@ -170,6 +181,7 @@ public class MainActivity extends Activity implements LocationListener {
                         handler.postDelayed(new Runnable() {
                             @Override public void run() { autoConnectSync(false); }
                         }, 900);
+                        scheduleStartupGreeting();
                     }
                 } else if (lastChargingState != chargingNow) {
                     boolean wasCharging = lastChargingState;
@@ -179,8 +191,10 @@ public class MainActivity extends Activity implements LocationListener {
                         handler.postDelayed(new Runnable() {
                             @Override public void run() { autoConnectSync(false); }
                         }, 900);
+                        scheduleStartupGreeting();
                     } else if (wasCharging && !chargingNow) {
                         if (carMotion != null) carMotion.startHazardAnimation();
+                        playShutdownChime();
                     }
                 }
                 dashboard.invalidate();
@@ -260,6 +274,96 @@ public class MainActivity extends Activity implements LocationListener {
         if (miniMap != null) {
             try { miniMap.onDetach(); } catch (Exception ignored) { }
         }
+        if (tts != null) {
+            try { tts.stop(); tts.shutdown(); } catch (Exception ignored) { }
+            tts = null;
+        }
+        if (shutdownPlayer != null) {
+            try { shutdownPlayer.release(); } catch (Exception ignored) { }
+            shutdownPlayer = null;
+        }
+    }
+
+    private void initVoiceAssistant() {
+        tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+            @Override public void onInit(int status) {
+                if (status != TextToSpeech.SUCCESS || tts == null) return;
+                int result = tts.setLanguage(new Locale("pt", "BR"));
+                ttsReady = result != TextToSpeech.LANG_MISSING_DATA &&
+                        result != TextToSpeech.LANG_NOT_SUPPORTED;
+                if (!ttsReady) {
+                    try {
+                        tts.setLanguage(Locale.getDefault());
+                        ttsReady = true;
+                    } catch (Exception ignored) { }
+                }
+                try {
+                    tts.setSpeechRate(0.93f);
+                    tts.setPitch(1.0f);
+                    if (android.os.Build.VERSION.SDK_INT >= 21) {
+                        tts.setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build());
+                    }
+                } catch (Exception ignored) { }
+                if (ttsReady && greetingPending) {
+                    greetingPending = false;
+                    speakStartupGreeting();
+                }
+            }
+        });
+    }
+
+    private void scheduleStartupGreeting() {
+        // Give Ford SYNC a few seconds to reconnect first, so the greeting usually plays in the car.
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { speakStartupGreeting(); }
+        }, 4200);
+    }
+
+    private void speakStartupGreeting() {
+        long now = SystemClock.uptimeMillis();
+        if (lastGreetingAt != 0L && now - lastGreetingAt < 30000L) return;
+        if (!ttsReady || tts == null) {
+            greetingPending = true;
+            return;
+        }
+
+        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        String greeting;
+        if (hour >= 5 && hour < 12) greeting = "Bom dia";
+        else if (hour >= 12 && hour < 18) greeting = "Boa tarde";
+        else greeting = "Boa noite";
+
+        String message = greeting + ". Não se esqueça de colocar o cinto de segurança e de ligar os faróis.";
+        lastGreetingAt = now;
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "central_lite_startup");
+            } else {
+                tts.speak(message, TextToSpeech.QUEUE_FLUSH, null);
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void playShutdownChime() {
+        try {
+            if (shutdownPlayer != null) {
+                try { shutdownPlayer.release(); } catch (Exception ignored) { }
+                shutdownPlayer = null;
+            }
+            shutdownPlayer = MediaPlayer.create(this, R.raw.shutdown_chime);
+            if (shutdownPlayer == null) return;
+            try { shutdownPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC); } catch (Exception ignored) { }
+            shutdownPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override public void onCompletion(MediaPlayer mp) {
+                    try { mp.release(); } catch (Exception ignored) { }
+                    if (shutdownPlayer == mp) shutdownPlayer = null;
+                }
+            });
+            shutdownPlayer.start();
+        } catch (Exception ignored) { }
     }
 
     private void launchPackage(String pkg, String fallbackUri) {
