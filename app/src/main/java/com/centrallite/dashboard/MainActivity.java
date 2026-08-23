@@ -19,6 +19,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.drawable.GradientDrawable;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -27,20 +28,38 @@ import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.Gravity;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 
+import java.io.File;
 import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Set;
 
+import org.osmdroid.config.Configuration;
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
+import org.osmdroid.util.GeoPoint;
+import org.osmdroid.views.MapView;
+import org.osmdroid.views.overlay.Marker;
+
 public class MainActivity extends Activity implements LocationListener {
+    private FrameLayout root;
     private DashboardView dashboard;
+    private CarMotionView carMotion;
+    private FrameLayout mapCard;
+    private MapView miniMap;
+    private Marker mapMarker;
+    private TextView speedBadge;
+    private boolean mapCentered = false;
     private LocationManager locationManager;
     private BroadcastReceiver batteryReceiver;
     private BroadcastReceiver bluetoothReceiver;
@@ -56,8 +75,17 @@ public class MainActivity extends Activity implements LocationListener {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
+        root = new FrameLayout(this);
         dashboard = new DashboardView(this);
-        setContentView(dashboard);
+        root.addView(dashboard, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        carMotion = new CarMotionView(this);
+        root.addView(carMotion, new FrameLayout.LayoutParams(1, 1));
+
+        setContentView(root);
+        setupMiniMap();
+        positionOverlayViews();
         enterImmersiveMode();
 
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
@@ -99,6 +127,10 @@ public class MainActivity extends Activity implements LocationListener {
         try {
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this);
             dashboard.gpsStatus = "Procurando";
+            try {
+                Location last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                if (last != null) updateMiniMap(last);
+            } catch (Exception ignored) { }
         } catch (Exception e) {
             dashboard.gpsStatus = "Indisponível";
         }
@@ -133,7 +165,7 @@ public class MainActivity extends Activity implements LocationListener {
                 if (lastChargingState == null) {
                     lastChargingState = chargingNow;
                     if (chargingNow) {
-                        dashboard.startIgnitionAnimation();
+                        if (carMotion != null) carMotion.startIgnitionAnimation();
                         handler.postDelayed(new Runnable() {
                             @Override public void run() { autoConnectSync(false); }
                         }, 900);
@@ -142,12 +174,12 @@ public class MainActivity extends Activity implements LocationListener {
                     boolean wasCharging = lastChargingState;
                     lastChargingState = chargingNow;
                     if (!wasCharging && chargingNow) {
-                        dashboard.startIgnitionAnimation();
+                        if (carMotion != null) carMotion.startIgnitionAnimation();
                         handler.postDelayed(new Runnable() {
                             @Override public void run() { autoConnectSync(false); }
                         }, 900);
                     } else if (wasCharging && !chargingNow) {
-                        dashboard.startHazardAnimation();
+                        if (carMotion != null) carMotion.startHazardAnimation();
                     }
                 }
                 dashboard.invalidate();
@@ -183,6 +215,8 @@ public class MainActivity extends Activity implements LocationListener {
         if (kmh < 1.5f) kmh = 0f;
         dashboard.speed = Math.round(kmh);
         dashboard.gpsStatus = "Conectado";
+        if (speedBadge != null) speedBadge.setText(dashboard.speed + " km/h");
+        updateMiniMap(location);
         dashboard.invalidate();
     }
 
@@ -194,10 +228,17 @@ public class MainActivity extends Activity implements LocationListener {
     protected void onResume() {
         super.onResume();
         enterImmersiveMode();
+        if (miniMap != null) miniMap.onResume();
         // If the user came back from Bluetooth settings, refresh the SYNC state.
         handler.postDelayed(new Runnable() {
             @Override public void run() { updateSyncStatus(); }
         }, 500);
+    }
+
+    @Override
+    protected void onPause() {
+        if (miniMap != null) miniMap.onPause();
+        super.onPause();
     }
 
     @Override
@@ -214,6 +255,10 @@ public class MainActivity extends Activity implements LocationListener {
         }
         handler.removeCallbacksAndMessages(null);
         if (dashboard != null) dashboard.stopAnimations();
+        if (carMotion != null) carMotion.stopAnimations();
+        if (miniMap != null) {
+            try { miniMap.onDetach(); } catch (Exception ignored) { }
+        }
     }
 
     private void launchPackage(String pkg, String fallbackUri) {
@@ -229,6 +274,152 @@ public class MainActivity extends Activity implements LocationListener {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=" + pkg)));
             } catch (Exception ignored) { }
         }
+    }
+
+    private void setupMiniMap() {
+        try {
+            Configuration config = Configuration.getInstance();
+            config.setUserAgentValue(getPackageName());
+            File basePath = new File(getCacheDir(), "osmdroid");
+            File tilePath = new File(basePath, "tiles");
+            if (!basePath.exists()) basePath.mkdirs();
+            if (!tilePath.exists()) tilePath.mkdirs();
+            config.setOsmdroidBasePath(basePath);
+            config.setOsmdroidTileCache(tilePath);
+        } catch (Exception ignored) { }
+
+        mapCard = new FrameLayout(this);
+        GradientDrawable cardBg = new GradientDrawable();
+        cardBg.setColor(Color.rgb(14, 18, 24));
+        cardBg.setCornerRadius(dp(14));
+        cardBg.setStroke(dp(2), Color.rgb(92, 104, 118));
+        mapCard.setBackground(cardBg);
+        mapCard.setPadding(dp(2), dp(2), dp(2), dp(2));
+        mapCard.setClipToOutline(true);
+
+        miniMap = new MapView(this);
+        miniMap.setTileSource(TileSourceFactory.MAPNIK);
+        miniMap.setBuiltInZoomControls(false);
+        miniMap.setMultiTouchControls(true);
+        miniMap.setTilesScaledToDpi(true);
+        miniMap.getController().setZoom(16.0);
+        mapCard.addView(miniMap, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        TextView mapLabel = makePill("MAPA", 11);
+        FrameLayout.LayoutParams labelLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.LEFT);
+        labelLp.leftMargin = dp(8);
+        labelLp.topMargin = dp(8);
+        mapCard.addView(mapLabel, labelLp);
+
+        TextView openMaps = makePill("MAPS ↗", 10);
+        openMaps.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                launchPackage("com.google.android.apps.maps", "geo:0,0?q=");
+            }
+        });
+        FrameLayout.LayoutParams openLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.RIGHT);
+        openLp.rightMargin = dp(8);
+        openLp.topMargin = dp(8);
+        mapCard.addView(openMaps, openLp);
+
+        speedBadge = makePill("0 km/h", 15);
+        speedBadge.setTextColor(Color.WHITE);
+        FrameLayout.LayoutParams speedLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.LEFT);
+        speedLp.leftMargin = dp(8);
+        speedLp.bottomMargin = dp(8);
+        mapCard.addView(speedBadge, speedLp);
+
+        TextView attribution = new TextView(this);
+        attribution.setText("© OpenStreetMap");
+        attribution.setTextColor(Color.rgb(245, 245, 245));
+        attribution.setTextSize(8);
+        attribution.setPadding(dp(4), dp(2), dp(4), dp(2));
+        GradientDrawable attrBg = new GradientDrawable();
+        attrBg.setColor(Color.argb(165, 0, 0, 0));
+        attrBg.setCornerRadius(dp(5));
+        attribution.setBackground(attrBg);
+        FrameLayout.LayoutParams attrLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.RIGHT);
+        attrLp.rightMargin = dp(6);
+        attrLp.bottomMargin = dp(6);
+        mapCard.addView(attribution, attrLp);
+
+        root.addView(mapCard, new FrameLayout.LayoutParams(1, 1));
+    }
+
+    private TextView makePill(String value, int textSp) {
+        TextView v = new TextView(this);
+        v.setText(value);
+        v.setTextColor(Color.WHITE);
+        v.setTextSize(textSp);
+        v.setGravity(Gravity.CENTER);
+        v.setPadding(dp(9), dp(5), dp(9), dp(5));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.argb(205, 0, 0, 0));
+        bg.setCornerRadius(dp(8));
+        v.setBackground(bg);
+        return v;
+    }
+
+    private void positionOverlayViews() {
+        root.post(new Runnable() {
+            @Override public void run() {
+                int w = root.getWidth();
+                int h = root.getHeight();
+                if (w <= 0 || h <= 0) return;
+
+                // Car image crop plus a little breathing room so the movement never clips.
+                FrameLayout.LayoutParams carLp = (FrameLayout.LayoutParams) carMotion.getLayoutParams();
+                carLp.leftMargin = Math.round(w * 0.240f);
+                carLp.topMargin = Math.round(h * 0.244f);
+                carLp.width = Math.round(w * 0.528f);
+                carLp.height = Math.round(h * 0.451f);
+                carMotion.setLayoutParams(carLp);
+
+                // Right-side always-on map: replaces the large speedometer/GPS block.
+                FrameLayout.LayoutParams mapLp = (FrameLayout.LayoutParams) mapCard.getLayoutParams();
+                mapLp.leftMargin = Math.round(w * 0.770f);
+                mapLp.topMargin = Math.round(h * 0.105f);
+                mapLp.width = Math.round(w * 0.215f);
+                mapLp.height = Math.round(h * 0.480f);
+                mapCard.setLayoutParams(mapLp);
+                mapCard.bringToFront();
+            }
+        });
+    }
+
+    private int dp(int value) {
+        float density = getResources().getDisplayMetrics().density;
+        return Math.max(1, Math.round(value * density));
+    }
+
+    private void updateMiniMap(Location location) {
+        if (location == null || miniMap == null) return;
+        try {
+            GeoPoint point = new GeoPoint(location.getLatitude(), location.getLongitude());
+            if (mapMarker == null) {
+                mapMarker = new Marker(miniMap);
+                mapMarker.setTitle("Posição atual");
+                mapMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER);
+                miniMap.getOverlays().add(mapMarker);
+            }
+            mapMarker.setPosition(point);
+            // Keep the map following the vehicle. Pinch/drag still works, and it recenters on the next GPS update.
+            miniMap.getController().setCenter(point);
+            if (!mapCentered) {
+                miniMap.getController().setZoom(16.5);
+                mapCentered = true;
+            }
+            miniMap.invalidate();
+        } catch (Exception ignored) { }
     }
 
     private boolean isSyncDevice(BluetoothDevice device) {
@@ -351,6 +542,115 @@ public class MainActivity extends Activity implements LocationListener {
         }
     }
 
+    private class CarMotionView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Rect src = new Rect();
+        private final RectF dst = new RectF();
+        private Bitmap carBitmap;
+        private long motionStartedAt = SystemClock.uptimeMillis();
+        private int lightMode = 0; // 0 idle, 1 headlights, 2 hazards
+        private boolean lightsOn = false;
+        private int lightTogglesLeft = 0;
+
+        CarMotionView(Context context) {
+            super(context);
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+            carBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.fusion_car_anim);
+            if (carBitmap != null) src.set(0, 0, carBitmap.getWidth(), carBitmap.getHeight());
+            post(motionTick);
+        }
+
+        private final Runnable motionTick = new Runnable() {
+            @Override public void run() {
+                invalidate();
+                // ~12.5 fps is visibly smooth while staying friendly to the old SM-T280 GPU.
+                postDelayed(this, 80);
+            }
+        };
+
+        private final Runnable lightTick = new Runnable() {
+            @Override public void run() {
+                if (lightTogglesLeft <= 0) {
+                    lightsOn = false;
+                    lightMode = 0;
+                    invalidate();
+                    return;
+                }
+                lightsOn = !lightsOn;
+                lightTogglesLeft--;
+                invalidate();
+                postDelayed(this, lightMode == 1 ? 300 : 420);
+            }
+        };
+
+        void startIgnitionAnimation() {
+            removeCallbacks(lightTick);
+            lightMode = 1;
+            lightsOn = false;
+            lightTogglesLeft = 6; // 3 flashes
+            post(lightTick);
+        }
+
+        void startHazardAnimation() {
+            removeCallbacks(lightTick);
+            lightMode = 2;
+            lightsOn = false;
+            lightTogglesLeft = 6; // 3 flashes
+            post(lightTick);
+        }
+
+        void stopAnimations() {
+            removeCallbacks(motionTick);
+            removeCallbacks(lightTick);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            super.onDraw(c);
+            if (carBitmap == null || getWidth() <= 0 || getHeight() <= 0) return;
+
+            int w = getWidth();
+            int h = getHeight();
+            // Exact crop alignment inside the padded overlay view.
+            dst.set(w * 0.0239f, h * 0.0447f, w * 0.9761f, h * 0.9553f);
+
+            float seconds = (SystemClock.uptimeMillis() - motionStartedAt) / 1000f;
+            // Real visible movement: gentle lateral sway + vertical float + small presentation rotation.
+            float dx = (float) Math.sin(seconds * 0.72f) * w * 0.0085f;
+            float dy = (float) Math.sin(seconds * 1.05f) * h * 0.0100f;
+            float rotation = (float) Math.sin(seconds * 0.48f) * 1.15f;
+            float breathe = 1.0f + (float) Math.sin(seconds * 0.55f) * 0.006f;
+            float yaw = 1.0f + (float) Math.sin(seconds * 0.34f) * 0.012f;
+
+            float cx = dst.centerX();
+            float cy = dst.centerY();
+            c.save();
+            c.translate(dx, dy);
+            c.rotate(rotation, cx, cy);
+            c.scale(breathe * yaw, breathe, cx, cy);
+            c.drawBitmap(carBitmap, src, dst, paint);
+
+            if (lightsOn) {
+                if (lightMode == 1) drawHeadlights(c, w, h);
+                else if (lightMode == 2) drawHazards(c, w, h);
+            }
+            c.restore();
+        }
+
+        private void drawHeadlights(Canvas c, int w, int h) {
+            paint.setColor(Color.argb(190, 238, 248, 255));
+            c.drawOval(new RectF(w * 0.335f, h * 0.390f, w * 0.575f, h * 0.555f), paint);
+            paint.setColor(Color.argb(135, 210, 236, 255));
+            c.drawOval(new RectF(w * 0.018f, h * 0.405f, w * 0.105f, h * 0.550f), paint);
+        }
+
+        private void drawHazards(Canvas c, int w, int h) {
+            paint.setColor(Color.argb(205, 255, 156, 35));
+            c.drawOval(new RectF(w * 0.505f, h * 0.410f, w * 0.575f, h * 0.540f), paint);
+            c.drawOval(new RectF(w * 0.030f, h * 0.420f, w * 0.083f, h * 0.540f), paint);
+        }
+    }
+
     private class DashboardView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
@@ -385,7 +685,6 @@ public class MainActivity extends Activity implements LocationListener {
                 src.set(0, 0, background.getWidth(), background.getHeight());
             }
             post(clockTick);
-            postDelayed(idleGlowTick, 6000);
         }
 
         private final Runnable clockTick = new Runnable() {
@@ -462,7 +761,6 @@ public class MainActivity extends Activity implements LocationListener {
             drawSyncTile(c, w, h);
             drawChromeTile(c, w, h);
             drawNewPipeTile(c, w, h);
-            drawCarAnimation(c, w, h);
         }
 
         private void drawDynamicClock(Canvas c, int w, int h) {

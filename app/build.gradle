@@ -15,7 +15,12 @@ android {
         applicationId "com.centrallite.dashboard"
         minSdk 21
         targetSdk 28
-        versionCode 6
-        versionName "0.6"
+        versionCode 7
+        versionName "0.7"
     }
+}
+
+
+dependencies {
+    implementation 'org.osmdroid:osmdroid-android:6.1.20'
 }
