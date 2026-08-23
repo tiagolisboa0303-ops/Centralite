@@ -372,6 +372,8 @@ public class MainActivity extends Activity implements LocationListener {
         boolean animationLightsOn = false;
         int animationTogglesLeft = 0;
         boolean idleGlow = false;
+        long touchDownAt = 0L;
+        int touchDownButton = -1;
 
         DashboardView(Context context) {
             super(context);
@@ -458,6 +460,7 @@ public class MainActivity extends Activity implements LocationListener {
             drawDynamicGps(c, w, h);
             drawSyncTile(c, w, h);
             drawChromeTile(c, w, h);
+            drawNewPipeTile(c, w, h);
             drawCarAnimation(c, w, h);
         }
 
@@ -614,6 +617,48 @@ public class MainActivity extends Activity implements LocationListener {
             c.drawText("Chrome", cx, r.top + r.height() * 0.80f, text);
         }
 
+        /** Replace Configurações with a NewPipe / YouTube Música shortcut. */
+        private void drawNewPipeTile(Canvas c, int w, int h) {
+            RectF r = buttons[5];
+            if (r == null) return;
+            float radius = h * 0.020f;
+
+            paint.setColor(Color.rgb(25, 29, 38));
+            c.drawRoundRect(r, radius, radius, paint);
+            stroke.setColor(Color.rgb(78, 82, 90));
+            stroke.setStrokeWidth(Math.max(1f, h * 0.0015f));
+            c.drawRoundRect(r, radius, radius, stroke);
+
+            float cx = r.centerX();
+            float cy = r.top + r.height() * 0.37f;
+            float iw = r.width() * 0.44f;
+            float ih = r.height() * 0.30f;
+
+            // YouTube-like red player icon. It is intentionally generic; NewPipe opens on tap.
+            paint.setColor(Color.rgb(230, 35, 35));
+            c.drawRoundRect(new RectF(cx - iw / 2f, cy - ih / 2f,
+                    cx + iw / 2f, cy + ih / 2f), ih * 0.25f, ih * 0.25f, paint);
+
+            Path play = new Path();
+            play.moveTo(cx - iw * 0.075f, cy - ih * 0.22f);
+            play.lineTo(cx - iw * 0.075f, cy + ih * 0.22f);
+            play.lineTo(cx + iw * 0.18f, cy);
+            play.close();
+            paint.setColor(Color.WHITE);
+            c.drawPath(play, paint);
+
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.032f);
+            text.setColor(Color.WHITE);
+            c.drawText("YouTube", cx, r.top + r.height() * 0.76f, text);
+
+            text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.019f);
+            text.setColor(Color.rgb(190, 195, 202));
+            c.drawText("Música • NewPipe", cx, r.top + r.height() * 0.91f, text);
+        }
+
         private void drawCarAnimation(Canvas c, int w, int h) {
             // Very subtle idle glow so the car feels alive without continuously taxing this old tablet.
             if (idleGlow && animationMode == 0) {
@@ -639,14 +684,33 @@ public class MainActivity extends Activity implements LocationListener {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
-            if (event.getAction() != MotionEvent.ACTION_UP) return true;
-            for (int i = 0; i < buttons.length; i++) {
-                if (buttons[i] != null && buttons[i].contains(event.getX(), event.getY())) {
-                    handleButton(i);
-                    return true;
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                touchDownAt = System.currentTimeMillis();
+                touchDownButton = findButtonAt(event.getX(), event.getY());
+                return true;
+            }
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                int button = findButtonAt(event.getX(), event.getY());
+                long held = System.currentTimeMillis() - touchDownAt;
+                if (button >= 0 && button == touchDownButton) {
+                    // Configurações continuam acessíveis: segure Aplicativos por ~0,7 s.
+                    if (button == 6 && held >= 650) {
+                        startActivity(new Intent(Settings.ACTION_SETTINGS));
+                    } else {
+                        handleButton(button);
+                    }
                 }
+                touchDownButton = -1;
+                return true;
             }
             return true;
+        }
+
+        private int findButtonAt(float x, float y) {
+            for (int i = 0; i < buttons.length; i++) {
+                if (buttons[i] != null && buttons[i].contains(x, y)) return i;
+            }
+            return -1;
         }
 
         private void handleButton(int index) {
@@ -667,7 +731,16 @@ public class MainActivity extends Activity implements LocationListener {
                     launchPackage("com.android.chrome", "https://www.google.com");
                     break;
                 case 5:
-                    startActivity(new Intent(Settings.ACTION_SETTINGS));
+                    // NewPipe supports background audio on old Android versions.
+                    // If it is not installed yet, open the official download page in the browser.
+                    Intent newPipe = getPackageManager().getLaunchIntentForPackage("org.schabi.newpipe");
+                    if (newPipe != null) {
+                        startActivity(newPipe);
+                    } else {
+                        try {
+                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://newpipe.net/#download")));
+                        } catch (Exception ignored) { }
+                    }
                     break;
                 case 6:
                     startActivity(new Intent(MainActivity.this, AppsActivity.class));
