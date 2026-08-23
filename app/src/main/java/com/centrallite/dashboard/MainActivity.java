@@ -2,11 +2,13 @@ package com.centrallite.dashboard;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.admin.DevicePolicyManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothProfile;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -40,6 +42,7 @@ import android.view.WindowManager;
 import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.speech.tts.TextToSpeech;
 
 import java.io.File;
@@ -76,7 +79,18 @@ public class MainActivity extends Activity implements LocationListener {
     private boolean ttsReady = false;
     private boolean greetingPending = false;
     private long lastGreetingAt = 0L;
+    private long lastShutdownSequenceAt = 0L;
     private MediaPlayer shutdownPlayer;
+    private DevicePolicyManager devicePolicyManager;
+    private ComponentName deviceAdminComponent;
+    private boolean parkingMode = false;
+    private boolean adminPromptScheduled = false;
+
+    private final Runnable parkingRunnable = new Runnable() {
+        @Override public void run() {
+            enterParkingMode();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -100,6 +114,10 @@ public class MainActivity extends Activity implements LocationListener {
         enterImmersiveMode();
         initVoiceAssistant();
 
+        devicePolicyManager = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+        deviceAdminComponent = new ComponentName(this, CentralDeviceAdminReceiver.class);
+        scheduleDeviceAdminRequest();
+
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         startBluetoothMonitor();
         startBatteryMonitor();
@@ -112,6 +130,29 @@ public class MainActivity extends Activity implements LocationListener {
                 autoConnectSync(false);
             }
         }, 1400);
+
+        if (getIntent() != null && getIntent().getBooleanExtra("wake_from_power", false)) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { handleIgnitionWake(); }
+            }, 250);
+        }
+        if (getIntent() != null && getIntent().getBooleanExtra("shutdown_from_power", false)) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { handleIgnitionOff(); }
+            }, 150);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.getBooleanExtra("wake_from_power", false)) {
+            handleIgnitionWake();
+        }
+        if (intent != null && intent.getBooleanExtra("shutdown_from_power", false)) {
+            handleIgnitionOff();
+        }
     }
 
     private void enterImmersiveMode() {
@@ -177,6 +218,7 @@ public class MainActivity extends Activity implements LocationListener {
                 if (lastChargingState == null) {
                     lastChargingState = chargingNow;
                     if (chargingNow) {
+                        exitParkingMode();
                         if (carMotion != null) carMotion.startIgnitionAnimation();
                         handler.postDelayed(new Runnable() {
                             @Override public void run() { autoConnectSync(false); }
@@ -187,14 +229,14 @@ public class MainActivity extends Activity implements LocationListener {
                     boolean wasCharging = lastChargingState;
                     lastChargingState = chargingNow;
                     if (!wasCharging && chargingNow) {
+                        exitParkingMode();
                         if (carMotion != null) carMotion.startIgnitionAnimation();
                         handler.postDelayed(new Runnable() {
                             @Override public void run() { autoConnectSync(false); }
                         }, 900);
                         scheduleStartupGreeting();
                     } else if (wasCharging && !chargingNow) {
-                        if (carMotion != null) carMotion.startHazardAnimation();
-                        playShutdownChime();
+                        handleIgnitionOff();
                     }
                 }
                 dashboard.invalidate();
@@ -282,6 +324,133 @@ public class MainActivity extends Activity implements LocationListener {
             try { shutdownPlayer.release(); } catch (Exception ignored) { }
             shutdownPlayer = null;
         }
+    }
+
+    private void scheduleDeviceAdminRequest() {
+        if (adminPromptScheduled || devicePolicyManager == null || deviceAdminComponent == null) return;
+        if (devicePolicyManager.isAdminActive(deviceAdminComponent)) return;
+        adminPromptScheduled = true;
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    Intent intent = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
+                    intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminComponent);
+                    intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                            "Permita para a Central Lite apagar e bloquear a tela automaticamente quando a ignição for desligada.");
+                    startActivity(intent);
+                } catch (Exception ignored) { }
+            }
+        }, 1800);
+    }
+
+    private void handleIgnitionOff() {
+        long now = SystemClock.uptimeMillis();
+        if (lastShutdownSequenceAt != 0L && now - lastShutdownSequenceAt < 2500L) return;
+        lastShutdownSequenceAt = now;
+        lastChargingState = false;
+        handler.removeCallbacks(parkingRunnable);
+        if (carMotion != null) {
+            carMotion.startAnimations();
+            carMotion.startHazardAnimation();
+        }
+        playShutdownChime();
+        scheduleParkingMode();
+    }
+
+    private void scheduleParkingMode() {
+        handler.removeCallbacks(parkingRunnable);
+        // Give the hazard animation and shutdown chime time to finish first.
+        handler.postDelayed(parkingRunnable, 3600);
+    }
+
+    private void enterParkingMode() {
+        if (parkingMode) return;
+        parkingMode = true;
+
+        // Stop the work that matters most for battery drain while the car is parked.
+        try {
+            if (locationManager != null) locationManager.removeUpdates(this);
+        } catch (Exception ignored) { }
+        if (miniMap != null) {
+            try { miniMap.onPause(); } catch (Exception ignored) { }
+        }
+        if (carMotion != null) carMotion.stopAnimations();
+        if (dashboard != null) dashboard.stopAnimations();
+
+        // Let the shutdown sound finish over SYNC, then turn Bluetooth off for parking.
+        if (bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
+            try { bluetoothAdapter.disable(); } catch (Exception ignored) { }
+        }
+
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+
+        if (devicePolicyManager != null && deviceAdminComponent != null &&
+                devicePolicyManager.isAdminActive(deviceAdminComponent)) {
+            try {
+                devicePolicyManager.lockNow();
+                return;
+            } catch (Exception ignored) { }
+        }
+
+        // Fallback if Device Administrator was not enabled: dim heavily instead of staying bright.
+        try {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = 0.02f;
+            getWindow().setAttributes(lp);
+            Toast.makeText(this, "Ative Administrador do dispositivo para apagar a tela automaticamente.",
+                    Toast.LENGTH_LONG).show();
+        } catch (Exception ignored) { }
+    }
+
+    private void exitParkingMode() {
+        handler.removeCallbacks(parkingRunnable);
+        boolean wasParking = parkingMode;
+        parkingMode = false;
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        try {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+            getWindow().setAttributes(lp);
+        } catch (Exception ignored) { }
+
+        if (!wasParking) return;
+
+        if (dashboard != null) dashboard.startAnimations();
+        if (carMotion != null) carMotion.startAnimations();
+        if (miniMap != null) {
+            try { miniMap.onResume(); } catch (Exception ignored) { }
+        }
+        requestLocationUpdates();
+
+        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
+            try { bluetoothAdapter.enable(); } catch (Exception ignored) { }
+        }
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { autoConnectSync(false); }
+        }, 1800);
+    }
+
+    private void handleIgnitionWake() {
+        // On Android 5.1 these flags allow the dedicated car dashboard to appear immediately
+        // after power returns. A secure PIN/pattern can still require the user's unlock.
+        try {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } catch (Exception ignored) { }
+        exitParkingMode();
+        enterImmersiveMode();
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                try { getWindow().clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON); }
+                catch (Exception ignored) { }
+            }
+        }, 2200);
     }
 
     private void initVoiceAssistant() {
@@ -679,17 +848,19 @@ public class MainActivity extends Activity implements LocationListener {
         private int lightMode = 0; // 0 idle, 1 headlights, 2 hazards
         private boolean lightsOn = false;
         private int lightTogglesLeft = 0;
+        private boolean motionRunning = false;
 
         CarMotionView(Context context) {
             super(context);
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             carBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.fusion_car_anim);
             if (carBitmap != null) src.set(0, 0, carBitmap.getWidth(), carBitmap.getHeight());
-            post(motionTick);
+            startAnimations();
         }
 
         private final Runnable motionTick = new Runnable() {
             @Override public void run() {
+                if (!motionRunning) return;
                 invalidate();
                 // ~12.5 fps is visibly smooth while staying friendly to the old SM-T280 GPU.
                 postDelayed(this, 80);
@@ -727,7 +898,15 @@ public class MainActivity extends Activity implements LocationListener {
             post(lightTick);
         }
 
+        void startAnimations() {
+            if (motionRunning) return;
+            motionRunning = true;
+            motionStartedAt = SystemClock.uptimeMillis();
+            post(motionTick);
+        }
+
         void stopAnimations() {
+            motionRunning = false;
             removeCallbacks(motionTick);
             removeCallbacks(lightTick);
         }
@@ -803,6 +982,7 @@ public class MainActivity extends Activity implements LocationListener {
         boolean idleGlow = false;
         long touchDownAt = 0L;
         int touchDownButton = -1;
+        boolean renderingRunning = false;
 
         DashboardView(Context context) {
             super(context);
@@ -812,11 +992,12 @@ public class MainActivity extends Activity implements LocationListener {
             if (background != null) {
                 src.set(0, 0, background.getWidth(), background.getHeight());
             }
-            post(clockTick);
+            startAnimations();
         }
 
         private final Runnable clockTick = new Runnable() {
             @Override public void run() {
+                if (!renderingRunning) return;
                 invalidate();
                 postDelayed(this, 1000);
             }
@@ -861,7 +1042,14 @@ public class MainActivity extends Activity implements LocationListener {
             post(animationTick);
         }
 
+        void startAnimations() {
+            if (renderingRunning) return;
+            renderingRunning = true;
+            post(clockTick);
+        }
+
         void stopAnimations() {
+            renderingRunning = false;
             removeCallbacks(clockTick);
             removeCallbacks(animationTick);
             removeCallbacks(idleGlowTick);
