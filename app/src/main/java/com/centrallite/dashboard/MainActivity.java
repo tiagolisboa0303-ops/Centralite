@@ -64,6 +64,7 @@ public class MainActivity extends Activity implements LocationListener {
     private FrameLayout root;
     private DashboardView dashboard;
     private CarMotionView carMotion;
+    private FordSplashView fordSplash;
     private FrameLayout mapCard;
     private MapView miniMap;
     private Marker mapMarker;
@@ -85,6 +86,7 @@ public class MainActivity extends Activity implements LocationListener {
     private ComponentName deviceAdminComponent;
     private boolean parkingMode = false;
     private boolean adminPromptScheduled = false;
+    private long lastStartupSequenceAt = 0L;
 
     private final Runnable parkingRunnable = new Runnable() {
         @Override public void run() {
@@ -107,6 +109,10 @@ public class MainActivity extends Activity implements LocationListener {
 
         carMotion = new CarMotionView(this);
         root.addView(carMotion, new FrameLayout.LayoutParams(1, 1));
+
+        fordSplash = new FordSplashView(this);
+        root.addView(fordSplash, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
         setupMiniMap();
@@ -141,6 +147,10 @@ public class MainActivity extends Activity implements LocationListener {
                 @Override public void run() { handleIgnitionOff(); }
             }, 150);
         }
+
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { playStartupSequence(); }
+        }, 350);
     }
 
     @Override
@@ -218,23 +228,13 @@ public class MainActivity extends Activity implements LocationListener {
                 if (lastChargingState == null) {
                     lastChargingState = chargingNow;
                     if (chargingNow) {
-                        exitParkingMode();
-                        if (carMotion != null) carMotion.startIgnitionAnimation();
-                        handler.postDelayed(new Runnable() {
-                            @Override public void run() { autoConnectSync(false); }
-                        }, 900);
-                        scheduleStartupGreeting();
+                        playStartupSequence();
                     }
                 } else if (lastChargingState != chargingNow) {
                     boolean wasCharging = lastChargingState;
                     lastChargingState = chargingNow;
                     if (!wasCharging && chargingNow) {
-                        exitParkingMode();
-                        if (carMotion != null) carMotion.startIgnitionAnimation();
-                        handler.postDelayed(new Runnable() {
-                            @Override public void run() { autoConnectSync(false); }
-                        }, 900);
-                        scheduleStartupGreeting();
+                        playStartupSequence();
                     } else if (wasCharging && !chargingNow) {
                         handleIgnitionOff();
                     }
@@ -443,7 +443,7 @@ public class MainActivity extends Activity implements LocationListener {
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } catch (Exception ignored) { }
-        exitParkingMode();
+        playStartupSequence();
         enterImmersiveMode();
         handler.postDelayed(new Runnable() {
             @Override public void run() {
@@ -451,6 +451,27 @@ public class MainActivity extends Activity implements LocationListener {
                 catch (Exception ignored) { }
             }
         }, 2200);
+    }
+
+    private void playStartupSequence() {
+        long now = SystemClock.uptimeMillis();
+        if (lastStartupSequenceAt != 0L && now - lastStartupSequenceAt < 3500L) return;
+        lastStartupSequenceAt = now;
+
+        exitParkingMode();
+        if (fordSplash != null) fordSplash.play();
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (carMotion != null) carMotion.startIgnitionAnimation();
+                if (dashboard != null) dashboard.startIgnitionAnimation();
+            }
+        }, 1650);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { autoConnectSync(false); }
+        }, 1050);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { scheduleStartupGreeting(); }
+        }, 1700);
     }
 
     private void initVoiceAssistant() {
@@ -958,6 +979,84 @@ public class MainActivity extends Activity implements LocationListener {
         }
     }
 
+    private class FordSplashView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        private boolean showing = false;
+        private long startedAt = 0L;
+
+        FordSplashView(Context context) {
+            super(context);
+            setVisibility(View.GONE);
+            setClickable(false);
+        }
+
+        private final Runnable frameTick = new Runnable() {
+            @Override public void run() {
+                if (!showing) return;
+                invalidate();
+                if (SystemClock.uptimeMillis() - startedAt >= 2400L) {
+                    showing = false;
+                    setVisibility(View.GONE);
+                    return;
+                }
+                postDelayed(this, 40);
+            }
+        };
+
+        void play() {
+            showing = true;
+            startedAt = SystemClock.uptimeMillis();
+            setVisibility(View.VISIBLE);
+            bringToFront();
+            removeCallbacks(frameTick);
+            post(frameTick);
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            super.onDraw(c);
+            if (!showing) return;
+            int w = getWidth(), h = getHeight();
+            float elapsed = SystemClock.uptimeMillis() - startedAt;
+            float alpha;
+            if (elapsed < 320f) alpha = elapsed / 320f;
+            else if (elapsed > 2050f) alpha = Math.max(0f, 1f - ((elapsed - 2050f) / 350f));
+            else alpha = 1f;
+
+            paint.setColor(Color.argb((int)(210 * alpha), 4, 7, 12));
+            c.drawRect(0, 0, w, h, paint);
+
+            float cx = w * 0.50f;
+            float cy = h * 0.44f;
+            float ovalW = Math.min(w * 0.42f, h * 0.70f);
+            float ovalH = ovalW * 0.48f;
+
+            paint.setColor(Color.argb((int)(60 * alpha), 130, 180, 255));
+            c.drawOval(new RectF(cx - ovalW * 0.60f, cy - ovalH * 0.82f, cx + ovalW * 0.60f, cy + ovalH * 0.82f), paint);
+
+            paint.setColor(Color.argb((int)(255 * alpha), 13, 71, 161));
+            c.drawOval(new RectF(cx - ovalW / 2f, cy - ovalH / 2f, cx + ovalW / 2f, cy + ovalH / 2f), paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(2f, h * 0.006f));
+            paint.setColor(Color.argb((int)(240 * alpha), 255, 255, 255));
+            c.drawOval(new RectF(cx - ovalW / 2f, cy - ovalH / 2f, cx + ovalW / 2f, cy + ovalH / 2f), paint);
+            paint.setStyle(Paint.Style.FILL);
+
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setColor(Color.argb((int)(255 * alpha), 255, 255, 255));
+            text.setTypeface(android.graphics.Typeface.create("serif", android.graphics.Typeface.BOLD_ITALIC));
+            text.setTextSize(h * 0.105f);
+            c.drawText("Ford", cx, cy + h * 0.028f, text);
+
+            text.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.040f);
+            text.setColor(Color.argb((int)(210 * alpha), 220, 228, 240));
+            c.drawText("Central Fusion", cx, cy + ovalH * 0.95f + h * 0.05f, text);
+        }
+    }
+
     private class DashboardView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
@@ -1311,12 +1410,12 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.032f);
             text.setColor(Color.WHITE);
-            c.drawText("YouTube", cx, r.top + r.height() * 0.76f, text);
+            c.drawText("Música", cx, r.top + r.height() * 0.76f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.019f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("Música • NewPipe", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("NewPipe", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawCarAnimation(Canvas c, int w, int h) {
