@@ -46,6 +46,7 @@ import java.util.Locale;
 import java.util.Set;
 
 import org.osmdroid.config.Configuration;
+import org.osmdroid.config.IConfigurationProvider;
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
 import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
@@ -278,7 +279,7 @@ public class MainActivity extends Activity implements LocationListener {
 
     private void setupMiniMap() {
         try {
-            Configuration config = Configuration.getInstance();
+            IConfigurationProvider config = Configuration.getInstance();
             config.setUserAgentValue(getPackageName());
             File basePath = new File(getCacheDir(), "osmdroid");
             File tilePath = new File(basePath, "tiles");
