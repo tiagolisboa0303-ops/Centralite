@@ -980,8 +980,11 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private class FordSplashView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        private final Rect src = new Rect();
+        private final RectF dst = new RectF();
+        private Bitmap logoBitmap;
         private boolean showing = false;
         private long startedAt = 0L;
 
@@ -989,13 +992,15 @@ public class MainActivity extends Activity implements LocationListener {
             super(context);
             setVisibility(View.GONE);
             setClickable(false);
+            logoBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.ford_logo_start);
+            if (logoBitmap != null) src.set(0, 0, logoBitmap.getWidth(), logoBitmap.getHeight());
         }
 
         private final Runnable frameTick = new Runnable() {
             @Override public void run() {
                 if (!showing) return;
                 invalidate();
-                if (SystemClock.uptimeMillis() - startedAt >= 2400L) {
+                if (SystemClock.uptimeMillis() - startedAt >= 2500L) {
                     showing = false;
                     setVisibility(View.GONE);
                     return;
@@ -1021,39 +1026,35 @@ public class MainActivity extends Activity implements LocationListener {
             int w = getWidth(), h = getHeight();
             float elapsed = SystemClock.uptimeMillis() - startedAt;
             float alpha;
-            if (elapsed < 320f) alpha = elapsed / 320f;
-            else if (elapsed > 2050f) alpha = Math.max(0f, 1f - ((elapsed - 2050f) / 350f));
+            if (elapsed < 280f) alpha = elapsed / 280f;
+            else if (elapsed > 2150f) alpha = Math.max(0f, 1f - ((elapsed - 2150f) / 350f));
             else alpha = 1f;
+            float scale = 0.92f + Math.min(1f, elapsed / 550f) * 0.08f;
 
-            paint.setColor(Color.argb((int)(210 * alpha), 4, 7, 12));
+            paint.setColor(Color.argb((int)(230 * alpha), 6, 10, 18));
             c.drawRect(0, 0, w, h, paint);
 
             float cx = w * 0.50f;
-            float cy = h * 0.44f;
-            float ovalW = Math.min(w * 0.42f, h * 0.70f);
-            float ovalH = ovalW * 0.48f;
+            float cy = h * 0.43f;
+            float logoW = w * 0.62f * scale;
+            float logoH = logoW * 0.44f;
 
-            paint.setColor(Color.argb((int)(60 * alpha), 130, 180, 255));
-            c.drawOval(new RectF(cx - ovalW * 0.60f, cy - ovalH * 0.82f, cx + ovalW * 0.60f, cy + ovalH * 0.82f), paint);
+            paint.setColor(Color.argb((int)(52 * alpha), 90, 160, 255));
+            c.drawOval(new RectF(cx - logoW * 0.63f, cy - logoH * 0.72f,
+                    cx + logoW * 0.63f, cy + logoH * 0.72f), paint);
 
-            paint.setColor(Color.argb((int)(255 * alpha), 13, 71, 161));
-            c.drawOval(new RectF(cx - ovalW / 2f, cy - ovalH / 2f, cx + ovalW / 2f, cy + ovalH / 2f), paint);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(Math.max(2f, h * 0.006f));
-            paint.setColor(Color.argb((int)(240 * alpha), 255, 255, 255));
-            c.drawOval(new RectF(cx - ovalW / 2f, cy - ovalH / 2f, cx + ovalW / 2f, cy + ovalH / 2f), paint);
-            paint.setStyle(Paint.Style.FILL);
+            if (logoBitmap != null) {
+                dst.set(cx - logoW / 2f, cy - logoH / 2f, cx + logoW / 2f, cy + logoH / 2f);
+                paint.setAlpha((int)(255 * alpha));
+                c.drawBitmap(logoBitmap, src, dst, paint);
+                paint.setAlpha(255);
+            }
 
             text.setTextAlign(Paint.Align.CENTER);
-            text.setColor(Color.argb((int)(255 * alpha), 255, 255, 255));
-            text.setTypeface(android.graphics.Typeface.create("serif", android.graphics.Typeface.BOLD_ITALIC));
-            text.setTextSize(h * 0.105f);
-            c.drawText("Ford", cx, cy + h * 0.028f, text);
-
             text.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.040f);
-            text.setColor(Color.argb((int)(210 * alpha), 220, 228, 240));
-            c.drawText("Central Fusion", cx, cy + ovalH * 0.95f + h * 0.05f, text);
+            text.setColor(Color.argb((int)(215 * alpha), 220, 228, 240));
+            c.drawText("Central Fusion", cx, cy + logoH * 0.78f + h * 0.04f, text);
         }
     }
 
