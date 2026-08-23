@@ -93,6 +93,12 @@ public class MainActivity extends Activity implements LocationListener {
         }
     };
 
+    private final Runnable syncDisconnectRunnable = new Runnable() {
+        @Override public void run() {
+            handleSyncOff();
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -277,9 +283,15 @@ public class MainActivity extends Activity implements LocationListener {
                 BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                 if (device != null && isSyncDevice(device)) {
                     if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
+                        handler.removeCallbacks(syncDisconnectRunnable);
                         dashboard.syncStatus = "Conectado";
+                        if (syncTriggeredParking || parkingMode) {
+                            handleSyncWake();
+                        }
                     } else if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action)) {
-                        dashboard.syncStatus = "Desconectado";
+                        dashboard.syncStatus = "Desconectado • desligando";
+                        handler.removeCallbacks(syncDisconnectRunnable);
+                        handler.postDelayed(syncDisconnectRunnable, 30000L);
                     }
                     dashboard.invalidate();
                 }
