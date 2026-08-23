@@ -528,22 +528,26 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void launchNavigator() {
-        Intent launch = getPackageManager().getLaunchIntentForPackage("com.mapfactor.navigator");
+        // Sygic GPS Navigation & Maps. The classic/standard Android package is com.sygic.aura.
+        Intent launch = getPackageManager().getLaunchIntentForPackage("com.sygic.aura");
         if (launch != null) {
             try {
+                launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                 startActivity(launch);
                 return;
             } catch (Exception ignored) { }
         }
 
-        // The current Play Store release no longer targets this old Android.
-        // Open the last known Android 5.0+ build page instead (MapFactor Navigator 6.2.11).
+        // Fallback: open Sygic's Play Store entry if the app was removed.
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(
-                    "https://www.apkmirror.com/apk/mapfactor/mapfactor-gps-navigation-maps/" +
-                    "mapfactor-gps-navigation-maps-6-2-11-release/" +
-                    "mapfactor-navigator-gps-navigation-maps-6-2-11-android-apk-download/")));
-        } catch (Exception ignored) { }
+            startActivity(new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("market://details?id=com.sygic.aura")));
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://play.google.com/store/apps/details?id=com.sygic.aura")));
+            } catch (Exception ignored) { }
+        }
     }
 
     private boolean isSyncDevice(BluetoothDevice device) {
@@ -969,7 +973,7 @@ public class MainActivity extends Activity implements LocationListener {
         }
 
         /** Replace the old Spotify tile visually without touching the approved background artwork. */
-        /** Replace the old Google Maps tile with MapFactor Navigator. */
+        /** Replace the old navigation tile with Sygic. */
         private void drawNavigatorTile(Canvas c, int w, int h) {
             RectF r = buttons[1];
             if (r == null) return;
@@ -1005,12 +1009,12 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.031f);
             text.setColor(Color.WHITE);
-            c.drawText("Navigator", cx, r.top + r.height() * 0.78f, text);
+            c.drawText("Sygic", cx, r.top + r.height() * 0.78f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("MapFactor", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Navegação", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawSyncTile(Canvas c, int w, int h) {
