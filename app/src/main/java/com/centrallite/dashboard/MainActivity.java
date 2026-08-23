@@ -315,10 +315,10 @@ public class MainActivity extends Activity implements LocationListener {
         labelLp.topMargin = dp(8);
         mapCard.addView(mapLabel, labelLp);
 
-        TextView openMaps = makePill("MAPS ↗", 10);
+        TextView openMaps = makePill("NAVEGAR ↗", 10);
         openMaps.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                launchPackage("com.google.android.apps.maps", "geo:0,0?q=");
+                launchNavigator();
             }
         });
         FrameLayout.LayoutParams openLp = new FrameLayout.LayoutParams(
@@ -420,6 +420,25 @@ public class MainActivity extends Activity implements LocationListener {
                 mapCentered = true;
             }
             miniMap.invalidate();
+        } catch (Exception ignored) { }
+    }
+
+    private void launchNavigator() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage("com.mapfactor.navigator");
+        if (launch != null) {
+            try {
+                startActivity(launch);
+                return;
+            } catch (Exception ignored) { }
+        }
+
+        // The current Play Store release no longer targets this old Android.
+        // Open the last known Android 5.0+ build page instead (MapFactor Navigator 6.2.11).
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(
+                    "https://www.apkmirror.com/apk/mapfactor/mapfactor-gps-navigation-maps/" +
+                    "mapfactor-gps-navigation-maps-6-2-11-release/" +
+                    "mapfactor-navigator-gps-navigation-maps-6-2-11-android-apk-download/")));
         } catch (Exception ignored) { }
     }
 
@@ -759,6 +778,7 @@ public class MainActivity extends Activity implements LocationListener {
             drawDynamicSpeed(c, w, h);
             drawDynamicBattery(c, w, h);
             drawDynamicGps(c, w, h);
+            drawNavigatorTile(c, w, h);
             drawSyncTile(c, w, h);
             drawChromeTile(c, w, h);
             drawNewPipeTile(c, w, h);
@@ -845,6 +865,50 @@ public class MainActivity extends Activity implements LocationListener {
         }
 
         /** Replace the old Spotify tile visually without touching the approved background artwork. */
+        /** Replace the old Google Maps tile with MapFactor Navigator. */
+        private void drawNavigatorTile(Canvas c, int w, int h) {
+            RectF r = buttons[1];
+            if (r == null) return;
+            float radius = h * 0.020f;
+
+            paint.setColor(Color.rgb(25, 29, 38));
+            c.drawRoundRect(r, radius, radius, paint);
+            stroke.setColor(Color.rgb(78, 82, 90));
+            stroke.setStrokeWidth(Math.max(1f, h * 0.0015f));
+            c.drawRoundRect(r, radius, radius, stroke);
+
+            float cx = r.centerX();
+            float cy = r.top + r.height() * 0.37f;
+            float rr = Math.min(r.width(), r.height()) * 0.22f;
+
+            // Lightweight navigation/compass symbol.
+            paint.setColor(Color.rgb(45, 140, 235));
+            c.drawCircle(cx, cy, rr, paint);
+            stroke.setColor(Color.rgb(235, 245, 255));
+            stroke.setStrokeWidth(Math.max(2f, rr * 0.10f));
+            c.drawCircle(cx, cy, rr * 0.82f, stroke);
+
+            Path nav = new Path();
+            nav.moveTo(cx + rr * 0.12f, cy - rr * 0.62f);
+            nav.lineTo(cx - rr * 0.48f, cy + rr * 0.48f);
+            nav.lineTo(cx + rr * 0.04f, cy + rr * 0.22f);
+            nav.lineTo(cx + rr * 0.42f, cy + rr * 0.54f);
+            nav.close();
+            paint.setColor(Color.WHITE);
+            c.drawPath(nav, paint);
+
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.031f);
+            text.setColor(Color.WHITE);
+            c.drawText("Navigator", cx, r.top + r.height() * 0.78f, text);
+
+            text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.018f);
+            text.setColor(Color.rgb(190, 195, 202));
+            c.drawText("MapFactor", cx, r.top + r.height() * 0.91f, text);
+        }
+
         private void drawSyncTile(Canvas c, int w, int h) {
             RectF r = buttons[2];
             if (r == null) return;
@@ -1019,7 +1083,7 @@ public class MainActivity extends Activity implements LocationListener {
                     launchPackage("com.waze", "waze://?navigate=yes");
                     break;
                 case 1:
-                    launchPackage("com.google.android.apps.maps", "geo:0,0?q=");
+                    launchNavigator();
                     break;
                 case 2:
                     autoConnectSync(true);
