@@ -87,6 +87,7 @@ public class MainActivity extends Activity implements LocationListener {
     private MediaPlayer shutdownPlayer;
     private boolean parkingMode = false;
     private long lastStartupSequenceAt = 0L;
+    private boolean resumeChromeOnNextReturn = false;
 
     private final Runnable parkingRunnable = new Runnable() {
         @Override public void run() {
@@ -287,6 +288,20 @@ public class MainActivity extends Activity implements LocationListener {
         handler.postDelayed(new Runnable() {
             @Override public void run() { updateSyncStatus(); }
         }, 500);
+
+        // Chrome/YouTube on Android 5.1 often pauses when it loses the foreground.
+        // If Chrome was opened from our dashboard for music, explicitly ask Android
+        // to resume the active media session when Central Lite comes back.
+        if (resumeChromeOnNextReturn && !parkingMode) {
+            resumeChromeOnNextReturn = false;
+            showMusicPanel();
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { resumeChromeAudioIfNeeded(); }
+            }, 450);
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { resumeChromeAudioIfNeeded(); }
+            }, 1200);
+        }
     }
 
     @Override
@@ -755,6 +770,14 @@ public class MainActivity extends Activity implements LocationListener {
             mapCard.bringToFront();
         }
         if (fordSplash != null && fordSplash.getVisibility() == View.VISIBLE) fordSplash.bringToFront();
+    }
+
+    private void resumeChromeAudioIfNeeded() {
+        try {
+            AudioManager audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (audio != null && audio.isMusicActive()) return;
+        } catch (Exception ignored) { }
+        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
     }
 
     private void dispatchMediaKey(int keyCode) {
@@ -1615,6 +1638,10 @@ public class MainActivity extends Activity implements LocationListener {
                     startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                     break;
                 case 4:
+                    // Treat Chrome as a music source. When the user returns to the dashboard,
+                    // Central Lite will try to resume YouTube audio automatically.
+                    resumeChromeOnNextReturn = true;
+                    showMusicPanel();
                     launchPackage("com.android.chrome", "https://www.google.com");
                     break;
                 case 5:
