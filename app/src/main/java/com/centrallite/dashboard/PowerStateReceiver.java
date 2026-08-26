@@ -21,14 +21,6 @@ public class PowerStateReceiver extends BroadcastReceiver {
 
         boolean shouldWake = Intent.ACTION_POWER_CONNECTED.equals(action);
         if (Intent.ACTION_BOOT_COMPLETED.equals(action)) {
-            // Fail-safe: a reboot must never leave charging disabled.
-            new Thread(new Runnable() {
-                @Override public void run() {
-                    if (ChargePrefs.isEnabled(context)) {
-                        PowerControl.setInputEnabled(true);
-                    }
-                }
-            }, "CentralLiteBootChargeOn").start();
             shouldWake = isCharging(context);
         }
         if (!shouldWake) return;
