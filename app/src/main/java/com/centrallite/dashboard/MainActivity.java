@@ -71,7 +71,6 @@ public class MainActivity extends Activity implements LocationListener {
     private FrameLayout musicCard;
     private TextView musicTitleView;
     private TextView musicSourceView;
-    private BroadcastReceiver mediaInfoReceiver;
     private boolean musicPanelVisible = false;
     private MapView miniMap;
     private Marker mapMarker;
@@ -124,7 +123,6 @@ public class MainActivity extends Activity implements LocationListener {
         setContentView(root);
         setupMiniMap();
         setupMusicPanel();
-        startMediaInfoReceiver();
         positionOverlayViews();
         enterImmersiveMode();
         initVoiceAssistant();
@@ -315,9 +313,6 @@ public class MainActivity extends Activity implements LocationListener {
         }
         if (bluetoothReceiver != null) {
             try { unregisterReceiver(bluetoothReceiver); } catch (Exception ignored) { }
-        }
-        if (mediaInfoReceiver != null) {
-            try { unregisterReceiver(mediaInfoReceiver); } catch (Exception ignored) { }
         }
         if (locationManager != null) {
             try { locationManager.removeUpdates(this); } catch (Exception ignored) { }
@@ -708,7 +703,7 @@ public class MainActivity extends Activity implements LocationListener {
         musicCard.addView(mapButton, mapBtnLp);
 
         musicTitleView = new TextView(this);
-        musicTitleView.setText("Aguardando música do Chrome");
+        musicTitleView.setText("Música no Chrome");
         musicTitleView.setTextColor(Color.WHITE);
         musicTitleView.setTextSize(18);
         musicTitleView.setGravity(Gravity.CENTER);
@@ -721,7 +716,7 @@ public class MainActivity extends Activity implements LocationListener {
         musicCard.addView(musicTitleView, titleLp);
 
         musicSourceView = new TextView(this);
-        musicSourceView.setText("Google Chrome");
+        musicSourceView.setText("Controles de reprodução");
         musicSourceView.setTextColor(Color.rgb(170, 182, 198));
         musicSourceView.setTextSize(11);
         musicSourceView.setGravity(Gravity.CENTER);
@@ -774,49 +769,6 @@ public class MainActivity extends Activity implements LocationListener {
         lp.rightMargin = dp(3);
         v.setLayoutParams(lp);
         return v;
-    }
-
-    private void startMediaInfoReceiver() {
-        mediaInfoReceiver = new BroadcastReceiver() {
-            @Override public void onReceive(Context context, Intent intent) {
-                if (!MediaNotificationListener.ACTION_MEDIA_INFO.equals(intent.getAction())) return;
-                boolean active = intent.getBooleanExtra("active", false);
-                String title = intent.getStringExtra("title");
-                String text = intent.getStringExtra("text");
-                if (active) {
-                    if (musicTitleView != null) {
-                        if (title != null && title.trim().length() > 0) musicTitleView.setText(title);
-                        else if (text != null && text.trim().length() > 0) musicTitleView.setText(text);
-                        else musicTitleView.setText("Música no Chrome");
-                    }
-                    if (musicSourceView != null) {
-                        musicSourceView.setText(text != null && text.trim().length() > 0 ? text : "Google Chrome");
-                    }
-                    showMusicPanel();
-                }
-            }
-        };
-        IntentFilter filter = new IntentFilter(MediaNotificationListener.ACTION_MEDIA_INFO);
-        registerReceiver(mediaInfoReceiver, filter);
-        scheduleMediaAccessPrompt();
-    }
-
-    private void scheduleMediaAccessPrompt() {
-        try {
-            String enabled = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
-            if (enabled != null && enabled.contains(getPackageName())) return;
-        } catch (Exception ignored) { }
-        handler.postDelayed(new Runnable() {
-            @Override public void run() {
-                try {
-                    Toast.makeText(MainActivity.this,
-                            "Para mostrar a música do Chrome na lateral, ative o acesso às notificações da Central Lite.",
-                            Toast.LENGTH_LONG).show();
-                    Intent settings = new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS");
-                    startActivity(settings);
-                } catch (Exception ignored) { }
-            }
-        }, 5200);
     }
 
     private void showMusicPanel() {
