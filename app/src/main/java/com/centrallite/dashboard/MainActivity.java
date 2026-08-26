@@ -2,13 +2,11 @@ package com.centrallite.dashboard;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.admin.DevicePolicyManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothProfile;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -44,7 +42,6 @@ import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.LinearLayout;
-import android.widget.Toast;
 import android.speech.tts.TextToSpeech;
 
 import java.io.File;
@@ -88,10 +85,7 @@ public class MainActivity extends Activity implements LocationListener {
     private long lastGreetingAt = 0L;
     private long lastShutdownSequenceAt = 0L;
     private MediaPlayer shutdownPlayer;
-    private DevicePolicyManager devicePolicyManager;
-    private ComponentName deviceAdminComponent;
     private boolean parkingMode = false;
-    private boolean adminPromptScheduled = false;
     private long lastStartupSequenceAt = 0L;
 
     private final Runnable parkingRunnable = new Runnable() {
@@ -126,10 +120,6 @@ public class MainActivity extends Activity implements LocationListener {
         positionOverlayViews();
         enterImmersiveMode();
         initVoiceAssistant();
-
-        devicePolicyManager = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
-        deviceAdminComponent = new ComponentName(this, CentralDeviceAdminReceiver.class);
-        scheduleDeviceAdminRequest();
 
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         startBluetoothMonitor();
@@ -333,23 +323,6 @@ public class MainActivity extends Activity implements LocationListener {
         }
     }
 
-    private void scheduleDeviceAdminRequest() {
-        if (adminPromptScheduled || devicePolicyManager == null || deviceAdminComponent == null) return;
-        if (devicePolicyManager.isAdminActive(deviceAdminComponent)) return;
-        adminPromptScheduled = true;
-        handler.postDelayed(new Runnable() {
-            @Override public void run() {
-                try {
-                    Intent intent = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
-                    intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminComponent);
-                    intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
-                            "Permita para a Central Lite apagar e bloquear a tela automaticamente quando a ignição for desligada.");
-                    startActivity(intent);
-                } catch (Exception ignored) { }
-            }
-        }, 1800);
-    }
-
     private void handleIgnitionOff() {
         long now = SystemClock.uptimeMillis();
         if (lastShutdownSequenceAt != 0L && now - lastShutdownSequenceAt < 2500L) return;
@@ -394,21 +367,14 @@ public class MainActivity extends Activity implements LocationListener {
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                 WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
 
-        if (devicePolicyManager != null && deviceAdminComponent != null &&
-                devicePolicyManager.isAdminActive(deviceAdminComponent)) {
-            try {
-                devicePolicyManager.lockNow();
-                return;
-            } catch (Exception ignored) { }
-        }
-
-        // Fallback if Device Administrator was not enabled: dim heavily instead of staying bright.
+        // Android 5.1: avoid Device Administrator/lockNow because Play Protect can block
+        // sideloaded apps that request sensitive device-control capabilities.
+        // Clearing KEEP_SCREEN_ON lets the tablet use its normal screen timeout.
+        // We dim immediately so parked battery drain is minimal while the timeout counts down.
         try {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.screenBrightness = 0.02f;
+            lp.screenBrightness = 0.01f;
             getWindow().setAttributes(lp);
-            Toast.makeText(this, "Ative Administrador do dispositivo para apagar a tela automaticamente.",
-                    Toast.LENGTH_LONG).show();
         } catch (Exception ignored) { }
     }
 
