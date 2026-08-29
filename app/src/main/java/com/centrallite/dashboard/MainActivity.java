@@ -2,6 +2,7 @@ package com.centrallite.dashboard;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.DownloadManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothProfile;
@@ -24,11 +25,15 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.Uri;
+import android.net.wifi.WifiConfiguration;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.view.KeyEvent;
 import android.os.BatteryManager;
+import android.os.Environment;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -42,7 +47,9 @@ import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.LinearLayout;
+import android.widget.Toast;
 import android.speech.tts.TextToSpeech;
+import android.speech.RecognizerIntent;
 
 import java.io.File;
 import java.lang.reflect.Method;
@@ -51,6 +58,9 @@ import java.util.Date;
 import java.util.Calendar;
 import java.util.Locale;
 import java.util.Set;
+import java.util.List;
+import java.util.ArrayList;
+import java.text.Normalizer;
 
 import org.osmdroid.config.Configuration;
 import org.osmdroid.config.IConfigurationProvider;
@@ -77,6 +87,7 @@ public class MainActivity extends Activity implements LocationListener {
     private BroadcastReceiver batteryReceiver;
     private BroadcastReceiver bluetoothReceiver;
     private BluetoothAdapter bluetoothAdapter;
+    private WifiManager wifiManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Boolean lastChargingState = null;
     private TextToSpeech tts;
@@ -88,6 +99,18 @@ public class MainActivity extends Activity implements LocationListener {
     private boolean parkingMode = false;
     private long lastStartupSequenceAt = 0L;
     private boolean resumeChromeOnNextReturn = false;
+    private boolean greetingWaitingForSync = false;
+    private boolean resumeMusicWaitingForSync = false;
+    private long newPipeDownloadId = -1L;
+    private BroadcastReceiver newPipeDownloadReceiver;
+    private BroadcastReceiver newPipePackageReceiver;
+    private static final int REQ_VOICE_COMMAND = 501;
+    private static final String PREFS = "central_lite_prefs";
+    private static final String PREF_RESUME_MUSIC = "resume_music_on_ignition";
+    private static final String PREF_LAST_MEDIA = "last_media_source";
+    private static final String PREF_IPHONE_SSID = "iphone_hotspot_ssid";
+    private static final String NEWPIPE_PKG = "org.schabi.newpipe";
+    private static final String NEWPIPE_APK_URL = "https://github.com/TeamNewPipe/NewPipe/releases/download/v0.28.7/NewPipe_v0.28.7.apk";
 
     private final Runnable parkingRunnable = new Runnable() {
         @Override public void run() {
@@ -123,9 +146,12 @@ public class MainActivity extends Activity implements LocationListener {
         initVoiceAssistant();
 
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        setupNewPipeInstallerReceivers();
         startBluetoothMonitor();
         startBatteryMonitor();
         startGps();
+        ensureIPhoneHotspotConnection();
 
         // On a normal launcher start, give Android a moment to finish booting the UI
         // and then try the already-paired Ford SYNC automatically.
@@ -145,6 +171,7 @@ public class MainActivity extends Activity implements LocationListener {
                 @Override public void run() { handleIgnitionOff(); }
             }, 150);
         }
+        handleExternalIntent(getIntent());
 
         handler.postDelayed(new Runnable() {
             @Override public void run() { playStartupSequence(); }
@@ -161,6 +188,7 @@ public class MainActivity extends Activity implements LocationListener {
         if (intent != null && intent.getBooleanExtra("shutdown_from_power", false)) {
             handleIgnitionOff();
         }
+        handleExternalIntent(intent);
     }
 
     private void enterImmersiveMode() {
@@ -251,6 +279,7 @@ public class MainActivity extends Activity implements LocationListener {
                 if (device != null && isSyncDevice(device)) {
                     if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
                         dashboard.syncStatus = "Conectado";
+                        onSyncConnectedForIgnition();
                     } else if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action)) {
                         dashboard.syncStatus = "Desconectado";
                     }
@@ -283,6 +312,7 @@ public class MainActivity extends Activity implements LocationListener {
     protected void onResume() {
         super.onResume();
         enterImmersiveMode();
+        ensureIPhoneHotspotConnection();
         if (miniMap != null) miniMap.onResume();
         // If the user came back from Bluetooth settings, refresh the SYNC state.
         handler.postDelayed(new Runnable() {
@@ -319,6 +349,12 @@ public class MainActivity extends Activity implements LocationListener {
         if (bluetoothReceiver != null) {
             try { unregisterReceiver(bluetoothReceiver); } catch (Exception ignored) { }
         }
+        if (newPipeDownloadReceiver != null) {
+            try { unregisterReceiver(newPipeDownloadReceiver); } catch (Exception ignored) { }
+        }
+        if (newPipePackageReceiver != null) {
+            try { unregisterReceiver(newPipePackageReceiver); } catch (Exception ignored) { }
+        }
         if (locationManager != null) {
             try { locationManager.removeUpdates(this); } catch (Exception ignored) { }
         }
@@ -343,6 +379,8 @@ public class MainActivity extends Activity implements LocationListener {
         if (lastShutdownSequenceAt != 0L && now - lastShutdownSequenceAt < 2500L) return;
         lastShutdownSequenceAt = now;
         lastChargingState = false;
+        rememberAndPauseMusicForParking();
+        greetingWaitingForSync = false;
         handler.removeCallbacks(parkingRunnable);
         if (carMotion != null) {
             carMotion.startAnimations();
@@ -372,9 +410,12 @@ public class MainActivity extends Activity implements LocationListener {
         if (carMotion != null) carMotion.stopAnimations();
         if (dashboard != null) dashboard.stopAnimations();
 
-        // Let the shutdown sound finish over SYNC, then turn Bluetooth off for parking.
+        // Let the shutdown sound finish over SYNC, then turn radios off for parking.
         if (bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
             try { bluetoothAdapter.disable(); } catch (Exception ignored) { }
+        }
+        if (wifiManager != null && wifiManager.isWifiEnabled()) {
+            try { wifiManager.setWifiEnabled(false); } catch (Exception ignored) { }
         }
 
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
@@ -391,6 +432,11 @@ public class MainActivity extends Activity implements LocationListener {
             lp.screenBrightness = 0.01f;
             getWindow().setAttributes(lp);
         } catch (Exception ignored) { }
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                try { moveTaskToBack(true); } catch (Exception ignored) { }
+            }
+        }, 700);
     }
 
     private void exitParkingMode() {
@@ -414,6 +460,7 @@ public class MainActivity extends Activity implements LocationListener {
         }
         requestLocationUpdates();
 
+        ensureIPhoneHotspotConnection();
         if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
             try { bluetoothAdapter.enable(); } catch (Exception ignored) { }
         }
@@ -447,6 +494,9 @@ public class MainActivity extends Activity implements LocationListener {
         lastStartupSequenceAt = now;
 
         exitParkingMode();
+        greetingWaitingForSync = true;
+        resumeMusicWaitingForSync = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_RESUME_MUSIC, false);
+        ensureIPhoneHotspotConnection();
         if (fordSplash != null) fordSplash.play();
         handler.postDelayed(new Runnable() {
             @Override public void run() {
@@ -457,9 +507,6 @@ public class MainActivity extends Activity implements LocationListener {
         handler.postDelayed(new Runnable() {
             @Override public void run() { autoConnectSync(false); }
         }, 1050);
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { scheduleStartupGreeting(); }
-        }, 1700);
     }
 
     private void initVoiceAssistant() {
@@ -503,11 +550,20 @@ public class MainActivity extends Activity implements LocationListener {
         }
     }
 
-    private void scheduleStartupGreeting() {
-        // Give Ford SYNC a few seconds to reconnect first, so the greeting usually plays in the car.
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { speakStartupGreeting(); }
-        }, 4200);
+    private void onSyncConnectedForIgnition() {
+        if (greetingWaitingForSync) {
+            greetingWaitingForSync = false;
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { speakStartupGreeting(); }
+            }, 900);
+        }
+        if (resumeMusicWaitingForSync) {
+            resumeMusicWaitingForSync = false;
+            // Give the greeting enough time to finish before restoring the previous music.
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { resumeLastMusicAfterIgnition(); }
+            }, 7000);
+        }
     }
 
     private void speakStartupGreeting() {
@@ -639,6 +695,16 @@ public class MainActivity extends Activity implements LocationListener {
         speedLp.bottomMargin = dp(8);
         mapCard.addView(speedBadge, speedLp);
 
+        TextView voiceButton = makePill("MIC", 10);
+        voiceButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { startVoiceCommand(); }
+        });
+        FrameLayout.LayoutParams voiceLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        voiceLp.bottomMargin = dp(8);
+        mapCard.addView(voiceButton, voiceLp);
+
         TextView attribution = new TextView(this);
         attribution.setText("© OpenStreetMap");
         attribution.setTextColor(Color.rgb(245, 245, 245));
@@ -682,6 +748,15 @@ public class MainActivity extends Activity implements LocationListener {
                 FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.RIGHT);
         musicCard.addView(mapButton, mapBtnLp);
+
+        TextView voiceButton = makePill("MIC", 10);
+        voiceButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { startVoiceCommand(); }
+        });
+        FrameLayout.LayoutParams voiceBtnLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        musicCard.addView(voiceButton, voiceBtnLp);
 
         musicTitleView = new TextView(this);
         musicTitleView.setText("Música no Chrome");
@@ -788,6 +863,238 @@ public class MainActivity extends Activity implements LocationListener {
             audio.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0));
             audio.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0));
         } catch (Exception ignored) { }
+    }
+
+    private void ensureIPhoneHotspotConnection() {
+        if (wifiManager == null) return;
+        try {
+            if (!wifiManager.isWifiEnabled()) wifiManager.setWifiEnabled(true);
+        } catch (Exception ignored) { }
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { connectSavedIPhoneHotspot(); }
+        }, 1200);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { connectSavedIPhoneHotspot(); }
+        }, 4500);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void connectSavedIPhoneHotspot() {
+        if (wifiManager == null || !wifiManager.isWifiEnabled()) return;
+        try {
+            WifiInfo info = wifiManager.getConnectionInfo();
+            String current = info != null ? cleanSsid(info.getSSID()) : null;
+            if (current != null && current.toLowerCase(Locale.US).contains("iphone")) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_IPHONE_SSID, current).apply();
+                return;
+            }
+
+            String preferred = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_IPHONE_SSID, "");
+            List<WifiConfiguration> configured = wifiManager.getConfiguredNetworks();
+            if (configured == null) return;
+            WifiConfiguration target = null;
+            for (WifiConfiguration cfg : configured) {
+                String ssid = cleanSsid(cfg.SSID);
+                if (ssid == null) continue;
+                if (!preferred.isEmpty() && ssid.equals(preferred)) { target = cfg; break; }
+                if (target == null && ssid.toLowerCase(Locale.US).contains("iphone")) target = cfg;
+            }
+            if (target != null) {
+                wifiManager.enableNetwork(target.networkId, true);
+                wifiManager.reconnect();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putString(PREF_IPHONE_SSID, cleanSsid(target.SSID)).apply();
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private String cleanSsid(String ssid) {
+        if (ssid == null || "<unknown ssid>".equalsIgnoreCase(ssid)) return null;
+        if (ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+            return ssid.substring(1, ssid.length() - 1);
+        }
+        return ssid;
+    }
+
+    private void rememberAndPauseMusicForParking() {
+        boolean active = false;
+        try {
+            AudioManager audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            active = audio != null && audio.isMusicActive();
+        } catch (Exception ignored) { }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_RESUME_MUSIC, active).apply();
+        if (active) dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE);
+    }
+
+    private void resumeLastMusicAfterIgnition() {
+        boolean shouldResume = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_RESUME_MUSIC, false);
+        if (!shouldResume || parkingMode) return;
+        try {
+            AudioManager audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (audio != null && audio.isMusicActive()) return;
+        } catch (Exception ignored) { }
+        showMusicPanel();
+        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY); }
+        }, 1100);
+    }
+
+    private void setupNewPipeInstallerReceivers() {
+        newPipeDownloadReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
+                long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L);
+                if (id != newPipeDownloadId || id < 0) return;
+                try {
+                    DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                    Uri apkUri = dm != null ? dm.getUriForDownloadedFile(id) : null;
+                    if (apkUri == null) return;
+                    Intent install = new Intent(Intent.ACTION_VIEW);
+                    install.setDataAndType(apkUri, "application/vnd.android.package-archive");
+                    install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(install);
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "Não consegui abrir o instalador do NewPipe.", Toast.LENGTH_LONG).show();
+                }
+            }
+        };
+        registerReceiver(newPipeDownloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+
+        newPipePackageReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                Uri data = intent.getData();
+                if (data == null || !NEWPIPE_PKG.equals(data.getSchemeSpecificPart())) return;
+                String pending = getSharedPreferences(PREFS, MODE_PRIVATE).getString("pending_youtube_url", "");
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("pending_youtube_url").apply();
+                handler.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        installOrLaunchNewPipe(pending.isEmpty() ? null : Uri.parse(pending));
+                    }
+                }, 500);
+            }
+        };
+        IntentFilter packageFilter = new IntentFilter(Intent.ACTION_PACKAGE_ADDED);
+        packageFilter.addDataScheme("package");
+        registerReceiver(newPipePackageReceiver, packageFilter);
+    }
+
+    private void installOrLaunchNewPipe(Uri youtubeUri) {
+        try {
+            getPackageManager().getApplicationInfo(NEWPIPE_PKG, 0);
+            Intent open;
+            if (youtubeUri != null) {
+                open = new Intent(Intent.ACTION_VIEW, youtubeUri);
+                open.setPackage(NEWPIPE_PKG);
+            } else {
+                open = getPackageManager().getLaunchIntentForPackage(NEWPIPE_PKG);
+            }
+            if (open != null) startActivity(open);
+            return;
+        } catch (Exception ignored) { }
+
+        if (youtubeUri != null) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("pending_youtube_url", youtubeUri.toString()).apply();
+        }
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) throw new IllegalStateException("DownloadManager indisponível");
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(NEWPIPE_APK_URL));
+            request.setTitle("NewPipe 0.28.7");
+            request.setDescription("Versão compatível com Android 5");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setAllowedOverRoaming(true);
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "NewPipe_v0.28.7.apk");
+            newPipeDownloadId = dm.enqueue(request);
+            Toast.makeText(this, "Baixando NewPipe. Ao terminar, confirme Instalar uma única vez.", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(NEWPIPE_APK_URL))); }
+            catch (Exception ignored2) { }
+        }
+    }
+
+    private void handleExternalIntent(Intent intent) {
+        if (intent == null) return;
+        if (intent.getBooleanExtra("voice_from_steering", false) ||
+                "android.intent.action.VOICE_COMMAND".equals(intent.getAction())) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { startVoiceCommand(); }
+            }, 250);
+        }
+        Uri data = intent.getData();
+        if (data != null) {
+            String host = data.getHost();
+            if (host != null) {
+                String h = host.toLowerCase(Locale.US);
+                if (h.contains("youtube.com") || h.equals("youtu.be")) {
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
+                    installOrLaunchNewPipe(data);
+                }
+            }
+        }
+    }
+
+    private void startVoiceCommand() {
+        try {
+            Intent voice = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            voice.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            voice.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR");
+            voice.putExtra(RecognizerIntent.EXTRA_PROMPT, "Diga um comando");
+            startActivityForResult(voice, REQ_VOICE_COMMAND);
+        } catch (Exception e) {
+            Toast.makeText(this, "Reconhecimento de voz não disponível neste tablet.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_VOICE_COMMAND || resultCode != RESULT_OK || data == null) return;
+        ArrayList<String> results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+        if (results == null || results.isEmpty()) return;
+        executeVoiceCommand(results.get(0));
+    }
+
+    private void executeVoiceCommand(String spoken) {
+        String cmd = normalizeCommand(spoken);
+        if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("sygic")) {
+            launchNavigator();
+        } else if (cmd.contains("abrir waze") || cmd.equals("waze")) {
+            launchPackage("com.waze", "waze://?navigate=yes");
+        } else if (cmd.contains("proxima musica") || cmd.contains("proxima faixa") || cmd.equals("proxima")) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT);
+        } else if (cmd.contains("musica anterior") || cmd.contains("faixa anterior") || cmd.equals("anterior")) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+        } else if (cmd.contains("pausar") || cmd.contains("pause")) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE);
+        } else if (cmd.contains("continuar musica") || cmd.contains("tocar musica") || cmd.equals("tocar")) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
+        } else if (cmd.contains("abrir musica") || cmd.contains("youtube") || cmd.contains("newpipe")) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
+            installOrLaunchNewPipe(null);
+        } else if (cmd.contains("abrir chrome") || cmd.contains("google")) {
+            launchPackage("com.android.chrome", "https://www.google.com");
+        } else {
+            Toast.makeText(this, "Comando não reconhecido: " + spoken, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private String normalizeCommand(String value) {
+        if (value == null) return "";
+        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
+                .replaceAll("\\p{InCombiningDiacriticalMarks}+", "");
+        return normalized.toLowerCase(new Locale("pt", "BR")).trim();
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
+                (android.os.Build.VERSION.SDK_INT >= 21 && keyCode == KeyEvent.KEYCODE_VOICE_ASSIST)) {
+            startVoiceCommand();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
     }
 
     private TextView makePill(String value, int textSp) {
@@ -967,6 +1274,7 @@ public class MainActivity extends Activity implements LocationListener {
         if (bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED) {
             dashboard.syncStatus = "Conectado";
             dashboard.invalidate();
+            onSyncConnectedForIgnition();
             return;
         }
 
@@ -982,6 +1290,7 @@ public class MainActivity extends Activity implements LocationListener {
 
                     if (alreadyConnected) {
                         dashboard.syncStatus = "Conectado";
+                        onSyncConnectedForIgnition();
                     } else {
                         boolean requested = false;
                         try {
@@ -1640,21 +1949,15 @@ public class MainActivity extends Activity implements LocationListener {
                 case 4:
                     // Treat Chrome as a music source. When the user returns to the dashboard,
                     // Central Lite will try to resume YouTube audio automatically.
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "chrome").apply();
                     resumeChromeOnNextReturn = true;
                     showMusicPanel();
                     launchPackage("com.android.chrome", "https://www.google.com");
                     break;
                 case 5:
-                    // NewPipe supports background audio on old Android versions.
-                    // If it is not installed yet, open the official download page in the browser.
-                    Intent newPipe = getPackageManager().getLaunchIntentForPackage("org.schabi.newpipe");
-                    if (newPipe != null) {
-                        startActivity(newPipe);
-                    } else {
-                        try {
-                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://newpipe.net/#download")));
-                        } catch (Exception ignored) { }
-                    }
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
+                    showMusicPanel();
+                    installOrLaunchNewPipe(null);
                     break;
                 case 6:
                     startActivity(new Intent(MainActivity.this, AppsActivity.class));
