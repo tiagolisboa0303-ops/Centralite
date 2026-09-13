@@ -2,6 +2,7 @@ package com.centrallite.dashboard;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -11,6 +12,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.DialogInterface;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -45,9 +47,11 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.view.Gravity;
 import android.widget.FrameLayout;
+import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.LinearLayout;
 import android.widget.Toast;
+import android.text.InputType;
 import android.speech.tts.TextToSpeech;
 import android.speech.RecognizerIntent;
 
@@ -118,6 +122,24 @@ public class MainActivity extends Activity implements LocationListener {
         }
     };
 
+    private final Runnable syncAutoRetryRunnable = new Runnable() {
+        @Override public void run() {
+            if (!parkingMode && bluetoothAdapter != null) {
+                try {
+                    if (!bluetoothAdapter.isEnabled() ||
+                            bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP) != BluetoothProfile.STATE_CONNECTED) {
+                        autoConnectSync(false);
+                    } else {
+                        dashboard.syncStatus = "Conectado";
+                        dashboard.invalidate();
+                        onSyncConnectedForIgnition();
+                    }
+                } catch (Exception ignored) { }
+            }
+            handler.postDelayed(this, 12000);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -151,7 +173,8 @@ public class MainActivity extends Activity implements LocationListener {
         startBluetoothMonitor();
         startBatteryMonitor();
         startGps();
-        ensureIPhoneHotspotConnection();
+        ensureSavedWifiConnection();
+        handler.postDelayed(syncAutoRetryRunnable, 2800);
 
         // On a normal launcher start, give Android a moment to finish booting the UI
         // and then try the already-paired Ford SYNC automatically.
@@ -281,7 +304,12 @@ public class MainActivity extends Activity implements LocationListener {
                         dashboard.syncStatus = "Conectado";
                         onSyncConnectedForIgnition();
                     } else if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action)) {
-                        dashboard.syncStatus = "Desconectado";
+                        dashboard.syncStatus = "Reconectando...";
+                        handler.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                if (!parkingMode) autoConnectSync(false);
+                            }
+                        }, 1800);
                     }
                     dashboard.invalidate();
                 }
@@ -312,7 +340,7 @@ public class MainActivity extends Activity implements LocationListener {
     protected void onResume() {
         super.onResume();
         enterImmersiveMode();
-        ensureIPhoneHotspotConnection();
+        ensureSavedWifiConnection();
         if (miniMap != null) miniMap.onResume();
         // If the user came back from Bluetooth settings, refresh the SYNC state.
         handler.postDelayed(new Runnable() {
@@ -460,7 +488,7 @@ public class MainActivity extends Activity implements LocationListener {
         }
         requestLocationUpdates();
 
-        ensureIPhoneHotspotConnection();
+        ensureSavedWifiConnection();
         if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
             try { bluetoothAdapter.enable(); } catch (Exception ignored) { }
         }
@@ -496,7 +524,7 @@ public class MainActivity extends Activity implements LocationListener {
         exitParkingMode();
         greetingWaitingForSync = true;
         resumeMusicWaitingForSync = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_RESUME_MUSIC, false);
-        ensureIPhoneHotspotConnection();
+        ensureSavedWifiConnection();
         if (fordSplash != null) fordSplash.play();
         handler.postDelayed(new Runnable() {
             @Override public void run() {
@@ -865,47 +893,56 @@ public class MainActivity extends Activity implements LocationListener {
         } catch (Exception ignored) { }
     }
 
-    private void ensureIPhoneHotspotConnection() {
+    private void ensureSavedWifiConnection() {
         if (wifiManager == null) return;
         try {
             if (!wifiManager.isWifiEnabled()) wifiManager.setWifiEnabled(true);
         } catch (Exception ignored) { }
+
+        // Android 5.1 already knows the passwords of networks saved in system settings.
+        // We simply enable Wi-Fi, scan and ask the framework to reconnect to the best saved network.
         handler.postDelayed(new Runnable() {
-            @Override public void run() { connectSavedIPhoneHotspot(); }
-        }, 1200);
+            @Override public void run() {
+                try {
+                    wifiManager.startScan();
+                    wifiManager.reconnect();
+                } catch (Exception ignored) { }
+            }
+        }, 900);
         handler.postDelayed(new Runnable() {
-            @Override public void run() { connectSavedIPhoneHotspot(); }
-        }, 4500);
+            @Override public void run() {
+                try { wifiManager.reconnect(); } catch (Exception ignored) { }
+                if (dashboard != null) dashboard.invalidate();
+            }
+        }, 3800);
     }
 
-    @SuppressWarnings("deprecation")
-    private void connectSavedIPhoneHotspot() {
-        if (wifiManager == null || !wifiManager.isWifiEnabled()) return;
+    private void openWifiNetworks() {
         try {
-            WifiInfo info = wifiManager.getConnectionInfo();
-            String current = info != null ? cleanSsid(info.getSSID()) : null;
-            if (current != null && current.toLowerCase(Locale.US).contains("iphone")) {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_IPHONE_SSID, current).apply();
-                return;
-            }
-
-            String preferred = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_IPHONE_SSID, "");
-            List<WifiConfiguration> configured = wifiManager.getConfiguredNetworks();
-            if (configured == null) return;
-            WifiConfiguration target = null;
-            for (WifiConfiguration cfg : configured) {
-                String ssid = cleanSsid(cfg.SSID);
-                if (ssid == null) continue;
-                if (!preferred.isEmpty() && ssid.equals(preferred)) { target = cfg; break; }
-                if (target == null && ssid.toLowerCase(Locale.US).contains("iphone")) target = cfg;
-            }
-            if (target != null) {
-                wifiManager.enableNetwork(target.networkId, true);
-                wifiManager.reconnect();
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putString(PREF_IPHONE_SSID, cleanSsid(target.SSID)).apply();
+            if (wifiManager != null) {
+                if (!wifiManager.isWifiEnabled()) wifiManager.setWifiEnabled(true);
+                wifiManager.startScan();
             }
         } catch (Exception ignored) { }
+        try {
+            startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));
+        } catch (Exception e) {
+            try { startActivity(new Intent(Settings.ACTION_SETTINGS)); } catch (Exception ignored) { }
+        }
+    }
+
+    private String currentWifiLabel() {
+        if (wifiManager == null) return "Buscar rede";
+        try {
+            if (!wifiManager.isWifiEnabled()) return "Wi-Fi desligado";
+            WifiInfo info = wifiManager.getConnectionInfo();
+            String ssid = info != null ? cleanSsid(info.getSSID()) : null;
+            if (ssid != null && info.getNetworkId() != -1) {
+                if (ssid.length() > 16) ssid = ssid.substring(0, 15) + "…";
+                return ssid;
+            }
+        } catch (Exception ignored) { }
+        return "Buscar rede";
     }
 
     private String cleanSsid(String ssid) {
@@ -1058,8 +1095,14 @@ public class MainActivity extends Activity implements LocationListener {
 
     private void executeVoiceCommand(String spoken) {
         String cmd = normalizeCommand(spoken);
-        if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("sygic")) {
-            launchNavigator();
+        if (cmd.startsWith("ir para ") || cmd.startsWith("navegar para ") || cmd.startsWith("levar para ")) {
+            String destination = spoken.replaceFirst("(?i)^(ir para|navegar para|levar para)\\s+", "").trim();
+            if (destination.length() > 0) launchMapFactorDestination(destination);
+            else showDestinationDialog();
+        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("mapfactor") || cmd.contains("navigator")) {
+            showDestinationDialog();
+        } else if (cmd.contains("internet") || cmd.contains("wifi") || cmd.contains("wi fi") || cmd.contains("buscar rede")) {
+            openWifiNetworks();
         } else if (cmd.contains("abrir waze") || cmd.equals("waze")) {
             launchPackage("com.waze", "waze://?navigate=yes");
         } else if (cmd.contains("proxima musica") || cmd.contains("proxima faixa") || cmd.equals("proxima")) {
@@ -1175,8 +1218,57 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void launchNavigator() {
-        // Sygic GPS Navigation & Maps. The classic/standard Android package is com.sygic.aura.
-        Intent launch = getPackageManager().getLaunchIntentForPackage("com.sygic.aura");
+        showDestinationDialog();
+    }
+
+    private void showDestinationDialog() {
+        final EditText input = new EditText(this);
+        input.setHint("Ex.: Goiânia Shopping");
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        int pad = dp(18);
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(pad, dp(4), pad, 0);
+        box.addView(input, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Para onde vamos?")
+                .setMessage("Digite um endereço, cidade ou local.")
+                .setView(box)
+                .setPositiveButton("NAVEGAR", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        String destination = input.getText().toString().trim();
+                        if (destination.length() == 0) launchMapFactorApp();
+                        else launchMapFactorDestination(destination);
+                    }
+                })
+                .setNeutralButton("ABRIR MAPA", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        launchMapFactorApp();
+                    }
+                })
+                .setNegativeButton("CANCELAR", null)
+                .create();
+        dialog.getWindow();
+        dialog.show();
+    }
+
+    private void launchMapFactorDestination(String destination) {
+        try {
+            Uri uri = Uri.parse("geo:0,0?q=" + Uri.encode(destination) + "&navigate=yes");
+            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+            intent.setPackage("com.mapfactor.navigator");
+            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "Instale o MapFactor Navigator 6.2 para usar a navegação.", Toast.LENGTH_LONG).show();
+            openMapFactorDownload();
+        }
+    }
+
+    private void launchMapFactorApp() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage("com.mapfactor.navigator");
         if (launch != null) {
             try {
                 launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
@@ -1184,17 +1276,16 @@ public class MainActivity extends Activity implements LocationListener {
                 return;
             } catch (Exception ignored) { }
         }
+        Toast.makeText(this, "Instale o MapFactor Navigator 6.2 para Android 5.1.", Toast.LENGTH_LONG).show();
+        openMapFactorDownload();
+    }
 
-        // Fallback: open Sygic's Play Store entry if the app was removed.
+    private void openMapFactorDownload() {
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("market://details?id=com.sygic.aura")));
-        } catch (Exception e) {
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW,
-                        Uri.parse("https://play.google.com/store/apps/details?id=com.sygic.aura")));
-            } catch (Exception ignored) { }
-        }
+            Intent web = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://navigatorfree.mapfactor.com/en/download/"));
+            startActivity(web);
+        } catch (Exception ignored) { }
     }
 
     private boolean isSyncDevice(BluetoothDevice device) {
@@ -1633,10 +1724,11 @@ public class MainActivity extends Activity implements LocationListener {
             drawDynamicSpeed(c, w, h);
             drawDynamicBattery(c, w, h);
             drawDynamicGps(c, w, h);
+            drawInternetTile(c, w, h);
             drawNavigatorTile(c, w, h);
             drawSyncTile(c, w, h);
             drawChromeTile(c, w, h);
-            drawNewPipeTile(c, w, h);
+            drawCommandsTile(c, w, h);
         }
 
         private void drawDynamicClock(Canvas c, int w, int h) {
@@ -1719,8 +1811,49 @@ public class MainActivity extends Activity implements LocationListener {
             }
         }
 
+        private void drawInternetTile(Canvas c, int w, int h) {
+            RectF r = buttons[0];
+            if (r == null) return;
+            float radius = h * 0.020f;
+
+            paint.setColor(Color.rgb(25, 29, 38));
+            c.drawRoundRect(r, radius, radius, paint);
+            stroke.setColor(Color.rgb(78, 82, 90));
+            stroke.setStrokeWidth(Math.max(1f, h * 0.0015f));
+            c.drawRoundRect(r, radius, radius, stroke);
+
+            float cx = r.centerX();
+            float cy = r.top + r.height() * 0.37f;
+            float rr = Math.min(r.width(), r.height()) * 0.28f;
+
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setStrokeCap(Paint.Cap.ROUND);
+            stroke.setColor(Color.rgb(70, 155, 255));
+            stroke.setStrokeWidth(Math.max(3f, h * 0.008f));
+            RectF a1 = new RectF(cx - rr, cy - rr * 0.70f, cx + rr, cy + rr * 1.30f);
+            RectF a2 = new RectF(cx - rr * 0.70f, cy - rr * 0.40f, cx + rr * 0.70f, cy + rr);
+            RectF a3 = new RectF(cx - rr * 0.40f, cy - rr * 0.10f, cx + rr * 0.40f, cy + rr * 0.70f);
+            c.drawArc(a1, 215, 110, false, stroke);
+            c.drawArc(a2, 215, 110, false, stroke);
+            c.drawArc(a3, 215, 110, false, stroke);
+            paint.setColor(Color.rgb(100, 210, 255));
+            c.drawCircle(cx, cy + rr * 0.74f, h * 0.010f, paint);
+            stroke.setStrokeCap(Paint.Cap.BUTT);
+
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.032f);
+            text.setColor(Color.WHITE);
+            c.drawText("Internet", cx, r.top + r.height() * 0.78f, text);
+
+            text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.0175f);
+            text.setColor(Color.rgb(190, 195, 202));
+            c.drawText(currentWifiLabel(), cx, r.top + r.height() * 0.91f, text);
+        }
+
         /** Replace the old Spotify tile visually without touching the approved background artwork. */
-        /** Replace the old navigation tile with Sygic. */
+        /** Navigation tile using MapFactor Navigator 6.2 for Android 5.1. */
         private void drawNavigatorTile(Canvas c, int w, int h) {
             RectF r = buttons[1];
             if (r == null) return;
@@ -1756,12 +1889,12 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.031f);
             text.setColor(Color.WHITE);
-            c.drawText("Sygic", cx, r.top + r.height() * 0.78f, text);
+            c.drawText("Destino", cx, r.top + r.height() * 0.78f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("Navegação", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("MapFactor", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawSyncTile(Canvas c, int w, int h) {
@@ -1836,8 +1969,8 @@ public class MainActivity extends Activity implements LocationListener {
             c.drawText("Chrome", cx, r.top + r.height() * 0.80f, text);
         }
 
-        /** Replace Configurações with a NewPipe / YouTube Música shortcut. */
-        private void drawNewPipeTile(Canvas c, int w, int h) {
+        /** Quick microphone/voice-command tile. */
+        private void drawCommandsTile(Canvas c, int w, int h) {
             RectF r = buttons[5];
             if (r == null) return;
             float radius = h * 0.020f;
@@ -1849,33 +1982,31 @@ public class MainActivity extends Activity implements LocationListener {
             c.drawRoundRect(r, radius, radius, stroke);
 
             float cx = r.centerX();
-            float cy = r.top + r.height() * 0.37f;
-            float iw = r.width() * 0.44f;
-            float ih = r.height() * 0.30f;
+            float cy = r.top + r.height() * 0.35f;
+            float micW = r.width() * 0.14f;
+            float micH = r.height() * 0.27f;
 
-            // YouTube-like red player icon. It is intentionally generic; NewPipe opens on tap.
-            paint.setColor(Color.rgb(230, 35, 35));
-            c.drawRoundRect(new RectF(cx - iw / 2f, cy - ih / 2f,
-                    cx + iw / 2f, cy + ih / 2f), ih * 0.25f, ih * 0.25f, paint);
-
-            Path play = new Path();
-            play.moveTo(cx - iw * 0.075f, cy - ih * 0.22f);
-            play.lineTo(cx - iw * 0.075f, cy + ih * 0.22f);
-            play.lineTo(cx + iw * 0.18f, cy);
-            play.close();
-            paint.setColor(Color.WHITE);
-            c.drawPath(play, paint);
+            paint.setColor(Color.rgb(75, 165, 255));
+            c.drawRoundRect(new RectF(cx - micW, cy - micH, cx + micW, cy + micH),
+                    micW, micW, paint);
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setStrokeWidth(Math.max(2f, h * 0.006f));
+            stroke.setColor(Color.WHITE);
+            c.drawArc(new RectF(cx - micW * 1.7f, cy - micH * 0.25f,
+                    cx + micW * 1.7f, cy + micH * 1.45f), 0, 180, false, stroke);
+            c.drawLine(cx, cy + micH * 1.15f, cx, cy + micH * 1.65f, stroke);
+            c.drawLine(cx - micW * 0.9f, cy + micH * 1.65f, cx + micW * 0.9f, cy + micH * 1.65f, stroke);
 
             text.setTextAlign(Paint.Align.CENTER);
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
-            text.setTextSize(h * 0.032f);
+            text.setTextSize(h * 0.030f);
             text.setColor(Color.WHITE);
-            c.drawText("Música", cx, r.top + r.height() * 0.76f, text);
+            c.drawText("Comandos", cx, r.top + r.height() * 0.78f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
-            text.setTextSize(h * 0.019f);
+            text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("NewPipe", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Falar", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawCarAnimation(Canvas c, int w, int h) {
@@ -1935,7 +2066,7 @@ public class MainActivity extends Activity implements LocationListener {
         private void handleButton(int index) {
             switch (index) {
                 case 0:
-                    launchPackage("com.waze", "waze://?navigate=yes");
+                    openWifiNetworks();
                     break;
                 case 1:
                     launchNavigator();
@@ -1955,9 +2086,7 @@ public class MainActivity extends Activity implements LocationListener {
                     launchPackage("com.android.chrome", "https://www.google.com");
                     break;
                 case 5:
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
-                    showMusicPanel();
-                    installOrLaunchNewPipe(null);
+                    startVoiceCommand();
                     break;
                 case 6:
                     startActivity(new Intent(MainActivity.this, AppsActivity.class));
