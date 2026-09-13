@@ -81,6 +81,9 @@ import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
 
 public class MainActivity extends Activity implements LocationListener {
+    private static final String WAZE_PACKAGE = "com.waze";
+    private static final String WAZE_COMPAT_PAGE = "https://www.apkmirror.com/apk/waze/waze-gps-maps-traffic-alerts-live-navigation/waze-gps-maps-traffic-alerts-live-navigation-4-89-0-1-release/waze-navigation-live-traffic-4-89-0-1-android-apk-download/";
+
     private FrameLayout root;
     private DashboardView dashboard;
     private CarMotionView carMotion;
@@ -1104,9 +1107,9 @@ public class MainActivity extends Activity implements LocationListener {
         String cmd = normalizeCommand(spoken);
         if (cmd.startsWith("ir para ") || cmd.startsWith("navegar para ") || cmd.startsWith("levar para ")) {
             String destination = spoken.replaceFirst("(?i)^(ir para|navegar para|levar para)\\s+", "").trim();
-            if (destination.length() > 0) launchSygicDestination(destination);
+            if (destination.length() > 0) launchWazeDestination(destination);
             else showDestinationDialog();
-        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("sygic") || cmd.contains("navegador")) {
+        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("waze") || cmd.contains("navegador")) {
             showDestinationDialog();
         } else if (cmd.contains("internet") || cmd.contains("wifi") || cmd.contains("wi fi") || cmd.contains("buscar rede")) {
             openWifiNetworks();
@@ -1115,7 +1118,7 @@ public class MainActivity extends Activity implements LocationListener {
         } else if (cmd.contains("abrir bluetooth") || cmd.equals("bluetooth")) {
             startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
         } else if (cmd.contains("abrir waze") || cmd.equals("waze")) {
-            launchPackage("com.waze", "waze://?navigate=yes");
+            launchWazeApp();
         } else if (cmd.contains("proxima musica") || cmd.contains("proxima faixa") || cmd.equals("proxima")) {
             dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT);
         } else if (cmd.contains("musica anterior") || cmd.contains("faixa anterior") || cmd.equals("anterior")) {
@@ -1229,7 +1232,39 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void launchNavigator() {
+        if (!isWazeInstalled()) {
+            showWazeInstallDialog();
+            return;
+        }
         showDestinationDialog();
+    }
+
+    private boolean isWazeInstalled() {
+        try {
+            getPackageManager().getPackageInfo(WAZE_PACKAGE, 0);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void showWazeInstallDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("Instalar Waze compatível")
+                .setMessage("Este Android 5.1 precisa de uma versão antiga do Waze. A versão 4.89.0.1 foi feita para Android 5.0+ e suporta ARMv7. Toque em BAIXAR WAZE, instale uma única vez e depois volte para a Central Lite.")
+                .setPositiveButton("BAIXAR WAZE", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(WAZE_COMPAT_PAGE))); }
+                        catch (Exception e) { Toast.makeText(MainActivity.this, "Não consegui abrir a página do Waze.", Toast.LENGTH_LONG).show(); }
+                    }
+                })
+                .setNeutralButton("MAPA WEB", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        openGoogleMapsWeb(null);
+                    }
+                })
+                .setNegativeButton("CANCELAR", null)
+                .show();
     }
 
     private void showDestinationDialog() {
@@ -1245,29 +1280,33 @@ public class MainActivity extends Activity implements LocationListener {
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Para onde vamos?")
-                .setMessage("Digite um endereço, cidade ou local.")
+                .setMessage("Digite um endereço, cidade ou local. A Central localiza e envia o destino ao Waze.")
                 .setView(box)
-                .setPositiveButton("NAVEGAR", new DialogInterface.OnClickListener() {
+                .setPositiveButton("WAZE", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
                         String destination = input.getText().toString().trim();
-                        if (destination.length() == 0) launchSygicApp();
-                        else launchSygicDestination(destination);
+                        if (destination.length() == 0) launchWazeApp();
+                        else launchWazeDestination(destination);
                     }
                 })
-                .setNeutralButton("ABRIR MAPA", new DialogInterface.OnClickListener() {
+                .setNeutralButton("MAPA WEB", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
-                        launchSygicApp();
+                        String destination = input.getText().toString().trim();
+                        openGoogleMapsWeb(destination);
                     }
                 })
                 .setNegativeButton("CANCELAR", null)
                 .create();
-        dialog.getWindow();
         dialog.show();
     }
 
-    private void launchSygicDestination(final String destination) {
+    private void launchWazeDestination(final String destination) {
+        if (!isWazeInstalled()) {
+            showWazeInstallDialog();
+            return;
+        }
         if (destination == null || destination.trim().length() == 0) {
-            launchSygicApp();
+            launchWazeApp();
             return;
         }
 
@@ -1285,7 +1324,7 @@ public class MainActivity extends Activity implements LocationListener {
                     connection = (HttpURLConnection) url.openConnection();
                     connection.setConnectTimeout(7000);
                     connection.setReadTimeout(7000);
-                    connection.setRequestProperty("User-Agent", "CentralLite/1.5.1 Android");
+                    connection.setRequestProperty("User-Agent", "CentralLite/1.6 Android");
                     connection.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
                     connection.connect();
 
@@ -1298,8 +1337,8 @@ public class MainActivity extends Activity implements LocationListener {
                     if (results.length() == 0) {
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
-                                Toast.makeText(MainActivity.this, "Local não encontrado. Abrindo o Sygic para pesquisar.", Toast.LENGTH_LONG).show();
-                                launchSygicApp();
+                                Toast.makeText(MainActivity.this, "Local não encontrado. Abrindo o Waze para pesquisar.", Toast.LENGTH_LONG).show();
+                                launchWazeApp();
                             }
                         });
                         return;
@@ -1309,13 +1348,13 @@ public class MainActivity extends Activity implements LocationListener {
                     final double lat = Double.parseDouble(first.getString("lat"));
                     final double lon = Double.parseDouble(first.getString("lon"));
                     runOnUiThread(new Runnable() {
-                        @Override public void run() { openSygicCoordinates(lat, lon); }
+                        @Override public void run() { openWazeCoordinates(lat, lon); }
                     });
                 } catch (Exception e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            Toast.makeText(MainActivity.this, "Não consegui pesquisar agora. Abrindo o Sygic.", Toast.LENGTH_LONG).show();
-                            launchSygicApp();
+                            Toast.makeText(MainActivity.this, "Não consegui pesquisar agora. Abrindo o Waze.", Toast.LENGTH_LONG).show();
+                            launchWazeApp();
                         }
                     });
                 } finally {
@@ -1326,31 +1365,30 @@ public class MainActivity extends Activity implements LocationListener {
         }).start();
     }
 
-    private void openSygicCoordinates(double lat, double lon) {
+    private void openWazeCoordinates(double lat, double lon) {
+        if (!isWazeInstalled()) {
+            showWazeInstallDialog();
+            return;
+        }
         try {
-            // Sygic legacy URL scheme expects longitude first, then latitude.
-            String uri = "com.sygic.aura://coordinate|" + lon + "|" + lat + "|drive";
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(uri));
+            Uri uri = Uri.parse("waze://?ll=" + lat + "," + lon + "&navigate=yes");
+            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+            intent.setPackage(WAZE_PACKAGE);
             intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
             startActivity(intent);
             return;
         } catch (Exception ignored) { }
 
-        // Fallback: generic GEO intent targeted at Sygic.
         try {
-            Uri geo = Uri.parse("geo:" + lat + "," + lon + "?q=" + lat + "," + lon);
-            Intent intent = new Intent(Intent.ACTION_VIEW, geo);
-            intent.setPackage("com.sygic.aura");
-            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-            startActivity(intent);
+            Uri uri = Uri.parse("https://www.waze.com/ul?ll=" + lat + "%2C" + lon + "&navigate=yes");
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
         } catch (Exception e) {
-            Toast.makeText(this, "Não consegui enviar o destino ao Sygic.", Toast.LENGTH_LONG).show();
-            launchSygicApp();
+            Toast.makeText(this, "Não consegui abrir o Waze.", Toast.LENGTH_LONG).show();
         }
     }
 
-    private void launchSygicApp() {
-        Intent launch = getPackageManager().getLaunchIntentForPackage("com.sygic.aura");
+    private void launchWazeApp() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage(WAZE_PACKAGE);
         if (launch != null) {
             try {
                 launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
@@ -1358,7 +1396,22 @@ public class MainActivity extends Activity implements LocationListener {
                 return;
             } catch (Exception ignored) { }
         }
-        Toast.makeText(this, "Sygic não encontrado neste tablet.", Toast.LENGTH_LONG).show();
+        showWazeInstallDialog();
+    }
+
+    private void openGoogleMapsWeb(String destination) {
+        try {
+            String url;
+            if (destination == null || destination.trim().length() == 0) {
+                url = "https://www.google.com/maps";
+            } else {
+                url = "https://www.google.com/maps/dir/?api=1&destination=" + Uri.encode(destination.trim());
+            }
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            Intent chrome = getPackageManager().getLaunchIntentForPackage("com.android.chrome");
+            if (chrome != null) intent.setPackage("com.android.chrome");
+            startActivity(intent);
+        } catch (Exception ignored) { }
     }
 
     private boolean isSyncDevice(BluetoothDevice device) {
@@ -1926,7 +1979,7 @@ public class MainActivity extends Activity implements LocationListener {
         }
 
         /** Replace the old Spotify tile visually without touching the approved background artwork. */
-        /** Navigation tile using the Sygic already installed on the tablet. */
+        /** Navigation tile using Waze when installed, with web fallback. */
         private void drawNavigatorTile(Canvas c, int w, int h) {
             RectF r = buttons[1];
             if (r == null) return;
@@ -1967,7 +2020,7 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("Sygic", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Waze", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawSyncTile(Canvas c, int w, int h) {
