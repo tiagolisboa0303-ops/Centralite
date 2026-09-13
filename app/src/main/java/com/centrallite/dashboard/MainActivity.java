@@ -980,11 +980,20 @@ public class MainActivity extends Activity implements LocationListener {
             AudioManager audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
             if (audio != null && audio.isMusicActive()) return;
         } catch (Exception ignored) { }
+        String lastSource = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_LAST_MEDIA, "");
         showMusicPanel();
-        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
+        if ("newpipe".equals(lastSource)) {
+            try {
+                Intent open = getPackageManager().getLaunchIntentForPackage(NEWPIPE_PKG);
+                if (open != null) startActivity(open);
+            } catch (Exception ignored) { }
+        }
         handler.postDelayed(new Runnable() {
             @Override public void run() { dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY); }
-        }, 1100);
+        }, 700);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY); }
+        }, 1700);
     }
 
     private void setupNewPipeInstallerReceivers() {
@@ -2057,7 +2066,7 @@ public class MainActivity extends Activity implements LocationListener {
         }
 
 
-        /** Replace the old Música tile with a lightweight Google Chrome shortcut. */
+        /** Música principal: NewPipe em segundo plano; segure para abrir o Chrome. */
         private void drawChromeTile(Canvas c, int w, int h) {
             RectF r = buttons[4];
             if (r == null) return;
@@ -2070,29 +2079,31 @@ public class MainActivity extends Activity implements LocationListener {
             c.drawRoundRect(r, radius, radius, stroke);
 
             float cx = r.centerX();
-            float cy = r.top + r.height() * 0.38f;
-            float rr = Math.min(r.width(), r.height()) * 0.23f;
+            float cy = r.top + r.height() * 0.36f;
+            float iw = r.width() * 0.43f;
+            float ih = r.height() * 0.29f;
 
-            // Chrome-style tri-color ring, drawn directly to keep the APK light.
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.rgb(219, 68, 55));
-            c.drawArc(new RectF(cx-rr, cy-rr, cx+rr, cy+rr), 210, 120, true, paint);
-            paint.setColor(Color.rgb(244, 180, 0));
-            c.drawArc(new RectF(cx-rr, cy-rr, cx+rr, cy+rr), 330, 120, true, paint);
-            paint.setColor(Color.rgb(15, 157, 88));
-            c.drawArc(new RectF(cx-rr, cy-rr, cx+rr, cy+rr), 90, 120, true, paint);
-
-            paint.setColor(Color.rgb(66, 133, 244));
-            c.drawCircle(cx, cy, rr * 0.48f, paint);
-            stroke.setColor(Color.rgb(235, 235, 235));
-            stroke.setStrokeWidth(Math.max(1f, rr * 0.10f));
-            c.drawCircle(cx, cy, rr * 0.51f, stroke);
+            paint.setColor(Color.rgb(230, 35, 35));
+            c.drawRoundRect(new RectF(cx - iw / 2f, cy - ih / 2f,
+                    cx + iw / 2f, cy + ih / 2f), ih * 0.26f, ih * 0.26f, paint);
+            Path play = new Path();
+            play.moveTo(cx - iw * 0.075f, cy - ih * 0.23f);
+            play.lineTo(cx - iw * 0.075f, cy + ih * 0.23f);
+            play.lineTo(cx + iw * 0.18f, cy);
+            play.close();
+            paint.setColor(Color.WHITE);
+            c.drawPath(play, paint);
 
             text.setTextAlign(Paint.Align.CENTER);
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
-            text.setTextSize(h * 0.035f);
+            text.setTextSize(h * 0.034f);
             text.setColor(Color.WHITE);
-            c.drawText("Chrome", cx, r.top + r.height() * 0.80f, text);
+            c.drawText("Música", cx, r.top + r.height() * 0.78f, text);
+
+            text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
+            text.setTextSize(h * 0.0175f);
+            text.setColor(Color.rgb(190, 195, 202));
+            c.drawText("NewPipe", cx, r.top + r.height() * 0.91f, text);
         }
 
         /** Quick microphone/voice-command tile. */
@@ -2169,8 +2180,10 @@ public class MainActivity extends Activity implements LocationListener {
                 int button = findButtonAt(event.getX(), event.getY());
                 long held = System.currentTimeMillis() - touchDownAt;
                 if (button >= 0 && button == touchDownButton) {
-                    // Configurações continuam acessíveis: segure Aplicativos por ~0,7 s.
-                    if (button == 6 && held >= 650) {
+                    // Segure Música para abrir Chrome. Segure Aplicativos para Configurações.
+                    if (button == 4 && held >= 650) {
+                        launchPackage("com.android.chrome", "https://www.google.com");
+                    } else if (button == 6 && held >= 650) {
                         startActivity(new Intent(Settings.ACTION_SETTINGS));
                     } else {
                         handleButton(button);
@@ -2204,12 +2217,11 @@ public class MainActivity extends Activity implements LocationListener {
                     startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                     break;
                 case 4:
-                    // Treat Chrome as a music source. When the user returns to the dashboard,
-                    // Central Lite will try to resume YouTube audio automatically.
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "chrome").apply();
-                    resumeChromeOnNextReturn = true;
+                    // NewPipe is the preferred music source because it supports background audio.
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
+                    resumeChromeOnNextReturn = false;
                     showMusicPanel();
-                    launchPackage("com.android.chrome", "https://www.google.com");
+                    installOrLaunchNewPipe(null);
                     break;
                 case 5:
                     startVoiceCommand();
