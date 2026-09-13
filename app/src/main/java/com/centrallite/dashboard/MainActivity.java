@@ -56,6 +56,10 @@ import android.speech.tts.TextToSpeech;
 import android.speech.RecognizerIntent;
 
 import java.io.File;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -65,6 +69,9 @@ import java.util.Set;
 import java.util.List;
 import java.util.ArrayList;
 import java.text.Normalizer;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import org.osmdroid.config.Configuration;
 import org.osmdroid.config.IConfigurationProvider;
@@ -1077,7 +1084,7 @@ public class MainActivity extends Activity implements LocationListener {
             Intent voice = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             voice.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
             voice.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR");
-            voice.putExtra(RecognizerIntent.EXTRA_PROMPT, "Diga um comando");
+            voice.putExtra(RecognizerIntent.EXTRA_PROMPT, "Ford Voice — diga um comando");
             startActivityForResult(voice, REQ_VOICE_COMMAND);
         } catch (Exception e) {
             Toast.makeText(this, "Reconhecimento de voz não disponível neste tablet.", Toast.LENGTH_LONG).show();
@@ -1097,12 +1104,16 @@ public class MainActivity extends Activity implements LocationListener {
         String cmd = normalizeCommand(spoken);
         if (cmd.startsWith("ir para ") || cmd.startsWith("navegar para ") || cmd.startsWith("levar para ")) {
             String destination = spoken.replaceFirst("(?i)^(ir para|navegar para|levar para)\\s+", "").trim();
-            if (destination.length() > 0) launchMapFactorDestination(destination);
+            if (destination.length() > 0) launchSygicDestination(destination);
             else showDestinationDialog();
-        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("mapfactor") || cmd.contains("navigator")) {
+        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("sygic") || cmd.contains("navegador")) {
             showDestinationDialog();
         } else if (cmd.contains("internet") || cmd.contains("wifi") || cmd.contains("wi fi") || cmd.contains("buscar rede")) {
             openWifiNetworks();
+        } else if (cmd.contains("conectar sync") || cmd.contains("conecte sync") || cmd.equals("sync")) {
+            autoConnectSync(true);
+        } else if (cmd.contains("abrir bluetooth") || cmd.equals("bluetooth")) {
+            startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
         } else if (cmd.contains("abrir waze") || cmd.equals("waze")) {
             launchPackage("com.waze", "waze://?navigate=yes");
         } else if (cmd.contains("proxima musica") || cmd.contains("proxima faixa") || cmd.equals("proxima")) {
@@ -1239,13 +1250,13 @@ public class MainActivity extends Activity implements LocationListener {
                 .setPositiveButton("NAVEGAR", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
                         String destination = input.getText().toString().trim();
-                        if (destination.length() == 0) launchMapFactorApp();
-                        else launchMapFactorDestination(destination);
+                        if (destination.length() == 0) launchSygicApp();
+                        else launchSygicDestination(destination);
                     }
                 })
                 .setNeutralButton("ABRIR MAPA", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
-                        launchMapFactorApp();
+                        launchSygicApp();
                     }
                 })
                 .setNegativeButton("CANCELAR", null)
@@ -1254,21 +1265,92 @@ public class MainActivity extends Activity implements LocationListener {
         dialog.show();
     }
 
-    private void launchMapFactorDestination(String destination) {
+    private void launchSygicDestination(final String destination) {
+        if (destination == null || destination.trim().length() == 0) {
+            launchSygicApp();
+            return;
+        }
+
+        Toast.makeText(this, "Procurando destino...", Toast.LENGTH_SHORT).show();
+        final String query = destination.trim();
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                HttpURLConnection connection = null;
+                BufferedReader reader = null;
+                try {
+                    String endpoint = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=br&q="
+                            + Uri.encode(query);
+                    URL url = new URL(endpoint);
+                    connection = (HttpURLConnection) url.openConnection();
+                    connection.setConnectTimeout(7000);
+                    connection.setReadTimeout(7000);
+                    connection.setRequestProperty("User-Agent", "CentralLite/1.5.1 Android");
+                    connection.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
+                    connection.connect();
+
+                    reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
+                    StringBuilder json = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) json.append(line);
+
+                    JSONArray results = new JSONArray(json.toString());
+                    if (results.length() == 0) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                Toast.makeText(MainActivity.this, "Local não encontrado. Abrindo o Sygic para pesquisar.", Toast.LENGTH_LONG).show();
+                                launchSygicApp();
+                            }
+                        });
+                        return;
+                    }
+
+                    JSONObject first = results.getJSONObject(0);
+                    final double lat = Double.parseDouble(first.getString("lat"));
+                    final double lon = Double.parseDouble(first.getString("lon"));
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { openSygicCoordinates(lat, lon); }
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            Toast.makeText(MainActivity.this, "Não consegui pesquisar agora. Abrindo o Sygic.", Toast.LENGTH_LONG).show();
+                            launchSygicApp();
+                        }
+                    });
+                } finally {
+                    try { if (reader != null) reader.close(); } catch (Exception ignored) { }
+                    if (connection != null) connection.disconnect();
+                }
+            }
+        }).start();
+    }
+
+    private void openSygicCoordinates(double lat, double lon) {
         try {
-            Uri uri = Uri.parse("geo:0,0?q=" + Uri.encode(destination) + "&navigate=yes");
-            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
-            intent.setPackage("com.mapfactor.navigator");
+            // Sygic legacy URL scheme expects longitude first, then latitude.
+            String uri = "com.sygic.aura://coordinate|" + lon + "|" + lat + "|drive";
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(uri));
+            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(intent);
+            return;
+        } catch (Exception ignored) { }
+
+        // Fallback: generic GEO intent targeted at Sygic.
+        try {
+            Uri geo = Uri.parse("geo:" + lat + "," + lon + "?q=" + lat + "," + lon);
+            Intent intent = new Intent(Intent.ACTION_VIEW, geo);
+            intent.setPackage("com.sygic.aura");
             intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
             startActivity(intent);
         } catch (Exception e) {
-            Toast.makeText(this, "Instale o MapFactor Navigator 6.2 para usar a navegação.", Toast.LENGTH_LONG).show();
-            openMapFactorDownload();
+            Toast.makeText(this, "Não consegui enviar o destino ao Sygic.", Toast.LENGTH_LONG).show();
+            launchSygicApp();
         }
     }
 
-    private void launchMapFactorApp() {
-        Intent launch = getPackageManager().getLaunchIntentForPackage("com.mapfactor.navigator");
+    private void launchSygicApp() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage("com.sygic.aura");
         if (launch != null) {
             try {
                 launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
@@ -1276,16 +1358,7 @@ public class MainActivity extends Activity implements LocationListener {
                 return;
             } catch (Exception ignored) { }
         }
-        Toast.makeText(this, "Instale o MapFactor Navigator 6.2 para Android 5.1.", Toast.LENGTH_LONG).show();
-        openMapFactorDownload();
-    }
-
-    private void openMapFactorDownload() {
-        try {
-            Intent web = new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://navigatorfree.mapfactor.com/en/download/"));
-            startActivity(web);
-        } catch (Exception ignored) { }
+        Toast.makeText(this, "Sygic não encontrado neste tablet.", Toast.LENGTH_LONG).show();
     }
 
     private boolean isSyncDevice(BluetoothDevice device) {
@@ -1853,7 +1926,7 @@ public class MainActivity extends Activity implements LocationListener {
         }
 
         /** Replace the old Spotify tile visually without touching the approved background artwork. */
-        /** Navigation tile using MapFactor Navigator 6.2 for Android 5.1. */
+        /** Navigation tile using the Sygic already installed on the tablet. */
         private void drawNavigatorTile(Canvas c, int w, int h) {
             RectF r = buttons[1];
             if (r == null) return;
@@ -1894,7 +1967,7 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("MapFactor", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Sygic", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawSyncTile(Canvas c, int w, int h) {
@@ -2001,12 +2074,12 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.030f);
             text.setColor(Color.WHITE);
-            c.drawText("Comandos", cx, r.top + r.height() * 0.78f, text);
+            c.drawText("Ford Voice", cx, r.top + r.height() * 0.78f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("Falar", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Assistente", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawCarAnimation(Canvas c, int w, int h) {
