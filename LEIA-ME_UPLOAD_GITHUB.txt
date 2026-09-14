@@ -1,0 +1,18 @@
+CENTRAL LITE v1.7.3 - PACOTE PRONTO PARA GITHUB
+
+1) Extraia este ZIP.
+2) Envie o conteúdo extraído para a RAIZ do repositório Centralite.
+3) Substitua os arquivos com o mesmo nome, principalmente:
+   .github/workflows/build-apk.yml
+   build.gradle
+   settings.gradle
+   gradle.properties
+   app/
+4) Faça o commit na branch main.
+5) O GitHub Actions "Build Central Lite APK" iniciará automaticamente.
+6) Quando ficar verde, baixe o artifact "CentralLite-v1.7.3-SM-T280".
+
+Este pacote NÃO usa android-actions/setup-android, evitando o erro:
+Failed to find package 'tools'
+
+O workflow localiza diretamente o sdkmanager já presente no runner do GitHub.
