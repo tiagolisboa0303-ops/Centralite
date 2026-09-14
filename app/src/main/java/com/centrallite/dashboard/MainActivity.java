@@ -69,6 +69,8 @@ import java.util.Set;
 import java.util.List;
 import java.util.ArrayList;
 import java.text.Normalizer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -83,6 +85,9 @@ import org.osmdroid.views.overlay.Marker;
 public class MainActivity extends Activity implements LocationListener {
     private static final String WAZE_PACKAGE = "com.waze";
     private static final String WAZE_COMPAT_PAGE = "https://www.apkmirror.com/apk/waze/waze-gps-maps-traffic-alerts-live-navigation/waze-gps-maps-traffic-alerts-live-navigation-4-89-0-1-release/waze-navigation-live-traffic-4-89-0-1-android-apk-download/";
+    private static final String SLATE_MODE_PATH = "/sys/class/power_supply/battery/batt_slate_mode";
+    private static final String MAGISK_BATTERY_POLICY =
+            "magiskpolicy --live \"allow magisk sysfs_battery_supply file { open read write getattr }\"";
 
     private FrameLayout root;
     private DashboardView dashboard;
@@ -103,7 +108,13 @@ public class MainActivity extends Activity implements LocationListener {
     private BluetoothAdapter bluetoothAdapter;
     private WifiManager wifiManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService rootPowerExecutor = Executors.newSingleThreadExecutor();
+    private volatile boolean rootPowerAvailable = false;
+    private volatile int lastSlateMode = -1;
     private Boolean lastChargingState = null;
+    private boolean syncLinkConnected = false;
+    private boolean driveSessionActive = false;
+    private static final long SYNC_OFF_DEBOUNCE_MS = 10000L;
     private TextToSpeech tts;
     private boolean ttsReady = false;
     private boolean greetingPending = false;
@@ -132,17 +143,32 @@ public class MainActivity extends Activity implements LocationListener {
         }
     };
 
+    private final Runnable syncDisconnectParkingRunnable = new Runnable() {
+        @Override public void run() {
+            if (!syncLinkConnected && driveSessionActive) {
+                handleSyncIgnitionOff();
+            }
+        }
+    };
+
+    private final Runnable noSyncParkingRunnable = new Runnable() {
+        @Override public void run() {
+            if (!syncLinkConnected && !driveSessionActive) {
+                enterParkingMode();
+            }
+        }
+    };
+
     private final Runnable syncAutoRetryRunnable = new Runnable() {
         @Override public void run() {
-            if (!parkingMode && bluetoothAdapter != null) {
+            if (parkingMode) return;
+            if (bluetoothAdapter != null) {
                 try {
-                    if (!bluetoothAdapter.isEnabled() ||
-                            bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP) != BluetoothProfile.STATE_CONNECTED) {
+                    if (!syncLinkConnected) {
                         autoConnectSync(false);
                     } else {
                         dashboard.syncStatus = "Conectado";
                         dashboard.invalidate();
-                        onSyncConnectedForIgnition();
                     }
                 } catch (Exception ignored) { }
             }
@@ -183,7 +209,13 @@ public class MainActivity extends Activity implements LocationListener {
         startBluetoothMonitor();
         startBatteryMonitor();
         startGps();
-        ensureSavedWifiConnection();
+
+        // Root power control: on every app start/reboot, fail safe to normal charging.
+        // This also asks Magisk for Central Lite root permission the first time.
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { primeRootPowerControl(); }
+        }, 650);
+
         handler.postDelayed(syncAutoRetryRunnable, 2800);
 
         // On a normal launcher start, give Android a moment to finish booting the UI
@@ -194,20 +226,19 @@ public class MainActivity extends Activity implements LocationListener {
             }
         }, 1400);
 
-        if (getIntent() != null && getIntent().getBooleanExtra("wake_from_power", false)) {
+        if (getIntent() != null && getIntent().getBooleanExtra("wake_from_sync", false)) {
             handler.postDelayed(new Runnable() {
-                @Override public void run() { handleIgnitionWake(); }
+                @Override public void run() { handleSyncWakeIntent(); }
+            }, 120);
+        } else if (getIntent() != null && getIntent().getBooleanExtra("wake_from_power", false)) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { beginSyncSearch(); }
             }, 250);
-        }
-        if (getIntent() != null && getIntent().getBooleanExtra("shutdown_from_power", false)) {
-            handler.postDelayed(new Runnable() {
-                @Override public void run() { handleIgnitionOff(); }
-            }, 150);
         }
         handleExternalIntent(getIntent());
 
         handler.postDelayed(new Runnable() {
-            @Override public void run() { playStartupSequence(); }
+            @Override public void run() { beginSyncSearch(); }
         }, 350);
     }
 
@@ -215,11 +246,10 @@ public class MainActivity extends Activity implements LocationListener {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (intent != null && intent.getBooleanExtra("wake_from_power", false)) {
-            handleIgnitionWake();
-        }
-        if (intent != null && intent.getBooleanExtra("shutdown_from_power", false)) {
-            handleIgnitionOff();
+        if (intent != null && intent.getBooleanExtra("wake_from_sync", false)) {
+            handleSyncWakeIntent();
+        } else if (intent != null && intent.getBooleanExtra("wake_from_power", false)) {
+            beginSyncSearch();
         }
         handleExternalIntent(intent);
     }
@@ -241,7 +271,13 @@ public class MainActivity extends Activity implements LocationListener {
             requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 100);
             return;
         }
-        requestLocationUpdates();
+        // GPS stays asleep until Ford SYNC confirms the car is actually on.
+        if (syncLinkConnected || driveSessionActive) {
+            requestLocationUpdates();
+        } else {
+            dashboard.gpsStatus = "Standby";
+            dashboard.invalidate();
+        }
     }
 
     @SuppressWarnings("MissingPermission")
@@ -283,21 +319,9 @@ public class MainActivity extends Activity implements LocationListener {
                 dashboard.battery = scale > 0 ? Math.round(level * 100f / scale) : 0;
                 dashboard.charging = chargingNow;
 
-                // We use external power as the practical ignition signal for this tablet setup.
-                if (lastChargingState == null) {
-                    lastChargingState = chargingNow;
-                    if (chargingNow) {
-                        playStartupSequence();
-                    }
-                } else if (lastChargingState != chargingNow) {
-                    boolean wasCharging = lastChargingState;
-                    lastChargingState = chargingNow;
-                    if (!wasCharging && chargingNow) {
-                        playStartupSequence();
-                    } else if (wasCharging && !chargingNow) {
-                        handleIgnitionOff();
-                    }
-                }
+                // The Fusion 2014 12 V outlet may stay powered with the engine off,
+                // so charging state is display-only. Ford SYNC is our ignition signal.
+                lastChargingState = chargingNow;
                 dashboard.invalidate();
             }
         };
@@ -311,17 +335,36 @@ public class MainActivity extends Activity implements LocationListener {
                 BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                 if (device != null && isSyncDevice(device)) {
                     if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
+                        syncLinkConnected = true;
+                        handler.removeCallbacks(syncDisconnectParkingRunnable);
+                        handler.removeCallbacks(noSyncParkingRunnable);
                         dashboard.syncStatus = "Conectado";
+                        dashboard.invalidate();
                         onSyncConnectedForIgnition();
                     } else if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action)) {
-                        dashboard.syncStatus = "Reconectando...";
-                        handler.postDelayed(new Runnable() {
-                            @Override public void run() {
-                                if (!parkingMode) autoConnectSync(false);
-                            }
-                        }, 1800);
+                        syncLinkConnected = false;
+                        dashboard.syncStatus = "SYNC desligado";
+                        dashboard.invalidate();
+                        handler.removeCallbacks(syncDisconnectParkingRunnable);
+
+                        // A quick Bluetooth dropout should not put the tablet to sleep while driving.
+                        // Give SYNC ten seconds to come back before treating it as ignition off.
+                        if (driveSessionActive) {
+                            handler.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    if (!syncLinkConnected && driveSessionActive) autoConnectSync(false);
+                                }
+                            }, 1800);
+                            handler.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    if (!syncLinkConnected && driveSessionActive) autoConnectSync(false);
+                                }
+                            }, 5200);
+                            handler.postDelayed(syncDisconnectParkingRunnable, SYNC_OFF_DEBOUNCE_MS);
+                        } else {
+                            handler.postDelayed(noSyncParkingRunnable, 8000);
+                        }
                     }
-                    dashboard.invalidate();
                 }
             }
         };
@@ -410,16 +453,21 @@ public class MainActivity extends Activity implements LocationListener {
             try { shutdownPlayer.release(); } catch (Exception ignored) { }
             shutdownPlayer = null;
         }
+        try { rootPowerExecutor.shutdownNow(); } catch (Exception ignored) { }
     }
 
-    private void handleIgnitionOff() {
+    private void handleSyncIgnitionOff() {
         long now = SystemClock.uptimeMillis();
         if (lastShutdownSequenceAt != 0L && now - lastShutdownSequenceAt < 2500L) return;
         lastShutdownSequenceAt = now;
-        lastChargingState = false;
+        syncLinkConnected = false;
+        driveSessionActive = false;
         rememberAndPauseMusicForParking();
         greetingWaitingForSync = false;
+        resumeMusicWaitingForSync = false;
         handler.removeCallbacks(parkingRunnable);
+        handler.removeCallbacks(syncAutoRetryRunnable);
+        handler.removeCallbacks(syncDisconnectParkingRunnable);
         if (carMotion != null) {
             carMotion.startAnimations();
             carMotion.startHazardAnimation();
@@ -438,6 +486,18 @@ public class MainActivity extends Activity implements LocationListener {
         if (parkingMode) return;
         parkingMode = true;
 
+        // Rooted SM-T280: disconnect the battery charger in Samsung Slate Mode.
+        // If root/policy fails, the helper immediately falls back to Slate Mode 0
+        // so the tablet is never accidentally left unable to charge.
+        setSlateModeAsync(true, true, new RootPowerCallback() {
+            @Override public void onComplete(boolean success, int state) {
+                if (dashboard != null && parkingMode) {
+                    dashboard.syncStatus = success ? "Standby SYNC • ECO" : "Standby • carga ON";
+                    dashboard.invalidate();
+                }
+            }
+        });
+
         // Stop the work that matters most for battery drain while the car is parked.
         try {
             if (locationManager != null) locationManager.removeUpdates(this);
@@ -448,12 +508,22 @@ public class MainActivity extends Activity implements LocationListener {
         if (carMotion != null) carMotion.stopAnimations();
         if (dashboard != null) dashboard.stopAnimations();
 
-        // Let the shutdown sound finish over SYNC, then turn radios off for parking.
-        if (bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
-            try { bluetoothAdapter.disable(); } catch (Exception ignored) { }
+        // Keep Bluetooth ON at idle: it is the low-power ignition sensor that lets the
+        // tablet notice Ford SYNC returning. Wi-Fi/GPS/map/rendering are stopped.
+        handler.removeCallbacks(syncAutoRetryRunnable);
+        handler.removeCallbacks(syncDisconnectParkingRunnable);
+        if (bluetoothAdapter != null) {
+            try { bluetoothAdapter.cancelDiscovery(); } catch (Exception ignored) { }
+            if (!bluetoothAdapter.isEnabled()) {
+                try { bluetoothAdapter.enable(); } catch (Exception ignored) { }
+            }
         }
         if (wifiManager != null && wifiManager.isWifiEnabled()) {
             try { wifiManager.setWifiEnabled(false); } catch (Exception ignored) { }
+        }
+        if (dashboard != null) {
+            dashboard.syncStatus = "Standby SYNC";
+            dashboard.invalidate();
         }
 
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
@@ -502,49 +572,199 @@ public class MainActivity extends Activity implements LocationListener {
         if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
             try { bluetoothAdapter.enable(); } catch (Exception ignored) { }
         }
-        handler.postDelayed(new Runnable() {
-            @Override public void run() { autoConnectSync(false); }
-        }, 1800);
+        handler.removeCallbacks(syncAutoRetryRunnable);
+        handler.postDelayed(syncAutoRetryRunnable, 2500);
     }
 
-    private void handleIgnitionWake() {
-        // On Android 5.1 these flags allow the dedicated car dashboard to appear immediately
-        // after power returns. A secure PIN/pattern can still require the user's unlock.
+    private void beginSyncSearch() {
+        greetingWaitingForSync = true;
+        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
+            try { bluetoothAdapter.enable(); } catch (Exception ignored) { }
+        }
+        if (dashboard != null) {
+            dashboard.syncStatus = "Procurando SYNC";
+            dashboard.invalidate();
+        }
+        handler.removeCallbacks(noSyncParkingRunnable);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { autoConnectSync(false); }
+        }, 700);
+        // If Central Lite was opened while the car is parked, do not leave the screen/GPS awake.
+        handler.postDelayed(noSyncParkingRunnable, 22000);
+    }
+
+    private void handleSyncWakeIntent() {
+        syncLinkConnected = true;
+        handler.removeCallbacks(noSyncParkingRunnable);
+        handler.removeCallbacks(syncDisconnectParkingRunnable);
+        onSyncConnectedForIgnition();
+    }
+
+    private void startDriveSessionAfterSyncConnected() {
+        if (driveSessionActive && !parkingMode) return;
+        driveSessionActive = true;
+        syncLinkConnected = true;
+        long now = SystemClock.uptimeMillis();
+        lastStartupSequenceAt = now;
+
         try {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } catch (Exception ignored) { }
-        playStartupSequence();
-        enterImmersiveMode();
-        handler.postDelayed(new Runnable() {
-            @Override public void run() {
-                try { getWindow().clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON); }
-                catch (Exception ignored) { }
-            }
-        }, 2200);
-    }
-
-    private void playStartupSequence() {
-        long now = SystemClock.uptimeMillis();
-        if (lastStartupSequenceAt != 0L && now - lastStartupSequenceAt < 3500L) return;
-        lastStartupSequenceAt = now;
 
         exitParkingMode();
-        greetingWaitingForSync = true;
-        resumeMusicWaitingForSync = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_RESUME_MUSIC, false);
+        enterImmersiveMode();
+        requestLocationUpdates();
         ensureSavedWifiConnection();
+        greetingWaitingForSync = false;
+        resumeMusicWaitingForSync = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_RESUME_MUSIC, false);
+
+        try {
+            Intent self = new Intent(this, MainActivity.class);
+            self.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(self);
+        } catch (Exception ignored) { }
+
         if (fordSplash != null) fordSplash.play();
         handler.postDelayed(new Runnable() {
             @Override public void run() {
                 if (carMotion != null) carMotion.startIgnitionAnimation();
                 if (dashboard != null) dashboard.startIgnitionAnimation();
             }
-        }, 1650);
+        }, 1500);
+
+        // Greeting only after the Ford SYNC Bluetooth link is confirmed.
         handler.postDelayed(new Runnable() {
-            @Override public void run() { autoConnectSync(false); }
-        }, 1050);
+            @Override public void run() { speakStartupGreeting(); }
+        }, 2400);
+
+        if (resumeMusicWaitingForSync) {
+            resumeMusicWaitingForSync = false;
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { resumeLastMusicAfterIgnition(); }
+            }, 7800);
+        }
+
+        handler.removeCallbacks(syncAutoRetryRunnable);
+        handler.postDelayed(syncAutoRetryRunnable, 12000);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                try { getWindow().clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON); }
+                catch (Exception ignored) { }
+            }
+        }, 2600);
+    }
+
+    private interface RootPowerCallback {
+        void onComplete(boolean success, int state);
+    }
+
+    private static class RootCommandResult {
+        final boolean success;
+        final String output;
+        RootCommandResult(boolean success, String output) {
+            this.success = success;
+            this.output = output == null ? "" : output.trim();
+        }
+    }
+
+    private void primeRootPowerControl() {
+        // Safe startup default: charging ON. This reapplies the SELinux rule after every reboot.
+        setSlateModeAsync(false, false, new RootPowerCallback() {
+            @Override public void onComplete(boolean success, int state) {
+                rootPowerAvailable = success;
+                if (!success) {
+                    Toast.makeText(MainActivity.this,
+                            "Central Lite: conceda acesso root no Magisk para controlar a carga",
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    private void setSlateModeAsync(final boolean enabled, final boolean notifyOnFailure,
+                                   final RootPowerCallback callback) {
+        final int target = enabled ? 1 : 0;
+        try {
+            rootPowerExecutor.execute(new Runnable() {
+                @Override public void run() {
+                    String command = MAGISK_BATTERY_POLICY + " >/dev/null 2>&1; " +
+                            "echo " + target + " > " + SLATE_MODE_PATH + "; " +
+                            "cat " + SLATE_MODE_PATH;
+                    RootCommandResult result = runRootCommand(command);
+                    boolean ok = result.success && outputEndsWithState(result.output, target);
+
+                    // Fail-safe: a failed request to disable charging must never leave the
+                    // tablet in an unknown no-charge state. Explicitly restore mode 0.
+                    if (!ok && target == 1) {
+                        RootCommandResult recovery = runRootCommand(
+                                MAGISK_BATTERY_POLICY + " >/dev/null 2>&1; " +
+                                        "echo 0 > " + SLATE_MODE_PATH + "; cat " + SLATE_MODE_PATH);
+                        if (recovery.success && outputEndsWithState(recovery.output, 0)) {
+                            lastSlateMode = 0;
+                        }
+                    } else if (ok) {
+                        lastSlateMode = target;
+                    }
+                    rootPowerAvailable = ok || (target == 1 && lastSlateMode == 0);
+
+                    final boolean finalOk = ok;
+                    final int finalState = ok ? target : lastSlateMode;
+                    handler.post(new Runnable() {
+                        @Override public void run() {
+                            if (!finalOk && notifyOnFailure) {
+                                Toast.makeText(MainActivity.this,
+                                        target == 1
+                                                ? "Modo ECO ROOT indisponível: carregamento mantido por segurança"
+                                                : "Não foi possível confirmar a retomada do carregamento",
+                                        Toast.LENGTH_LONG).show();
+                            }
+                            if (callback != null) callback.onComplete(finalOk, finalState);
+                        }
+                    });
+                }
+            });
+        } catch (Exception e) {
+            if (callback != null) callback.onComplete(false, lastSlateMode);
+        }
+    }
+
+    private RootCommandResult runRootCommand(String command) {
+        Process process = null;
+        BufferedReader reader = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{"su", "-c", command + " 2>&1"});
+            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder output = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (output.length() > 0) output.append('\n');
+                output.append(line);
+            }
+            int exit = process.waitFor();
+            return new RootCommandResult(exit == 0, output.toString());
+        } catch (Exception e) {
+            return new RootCommandResult(false, e.getClass().getSimpleName());
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (Exception ignored) { }
+            }
+            if (process != null) {
+                try { process.destroy(); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    private boolean outputEndsWithState(String output, int target) {
+        if (output == null) return false;
+        String trimmed = output.trim();
+        if (trimmed.equals(String.valueOf(target))) return true;
+        int newline = trimmed.lastIndexOf('\n');
+        String last = newline >= 0 ? trimmed.substring(newline + 1).trim() : trimmed;
+        return last.equals(String.valueOf(target));
     }
 
     private void initVoiceAssistant() {
@@ -589,18 +809,51 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void onSyncConnectedForIgnition() {
+        syncLinkConnected = true;
+        handler.removeCallbacks(syncDisconnectParkingRunnable);
+        handler.removeCallbacks(noSyncParkingRunnable);
+        if (dashboard != null) {
+            dashboard.syncStatus = "SYNC conectado";
+            dashboard.invalidate();
+        }
+
+        // Charging is restored BEFORE GPS/Wi-Fi/animations/greeting. On this rooted
+        // SM-T280, batt_slate_mode=0 is the tested normal-charging state.
+        setSlateModeAsync(false, true, new RootPowerCallback() {
+            @Override public void onComplete(boolean success, int state) {
+                continueAfterSyncChargingRestore(success);
+            }
+        });
+    }
+
+    private void continueAfterSyncChargingRestore(boolean chargingRestored) {
+        if (dashboard != null) {
+            dashboard.syncStatus = chargingRestored ? "Conectado" : "Conectado • verificar carga";
+            dashboard.invalidate();
+        }
+
+        // Never block the driving UI if root is unavailable. We retry charging in the
+        // background, but SYNC still wakes the dashboard normally.
+        if (!chargingRestored) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { setSlateModeAsync(false, false, null); }
+            }, 1500);
+            handler.postDelayed(new Runnable() {
+                @Override public void run() { setSlateModeAsync(false, false, null); }
+            }, 5000);
+        }
+
+        if (!driveSessionActive || parkingMode) {
+            startDriveSessionAfterSyncConnected();
+            return;
+        }
+
+        // If the app was already awake waiting for SYNC, the greeting is released here.
         if (greetingWaitingForSync) {
             greetingWaitingForSync = false;
             handler.postDelayed(new Runnable() {
                 @Override public void run() { speakStartupGreeting(); }
             }, 900);
-        }
-        if (resumeMusicWaitingForSync) {
-            resumeMusicWaitingForSync = false;
-            // Give the greeting enough time to finish before restoring the previous music.
-            handler.postDelayed(new Runnable() {
-                @Override public void run() { resumeLastMusicAfterIgnition(); }
-            }, 7000);
         }
     }
 
@@ -1497,13 +1750,6 @@ public class MainActivity extends Activity implements LocationListener {
             return;
         }
 
-        if (bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED) {
-            dashboard.syncStatus = "Conectado";
-            dashboard.invalidate();
-            onSyncConnectedForIgnition();
-            return;
-        }
-
         dashboard.syncStatus = "Conectando...";
         dashboard.invalidate();
 
@@ -1515,6 +1761,7 @@ public class MainActivity extends Activity implements LocationListener {
                     try { alreadyConnected = proxy.getConnectedDevices().contains(syncDevice); } catch (Exception ignored) { }
 
                     if (alreadyConnected) {
+                        syncLinkConnected = true;
                         dashboard.syncStatus = "Conectado";
                         onSyncConnectedForIgnition();
                     } else {

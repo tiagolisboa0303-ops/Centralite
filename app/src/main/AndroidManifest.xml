@@ -21,9 +21,17 @@
             android:enabled="true"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
-                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+
+        <receiver
+            android:name=".SyncStateReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
             </intent-filter>
         </receiver>
 
