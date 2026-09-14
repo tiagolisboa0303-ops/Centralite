@@ -57,7 +57,9 @@ import android.speech.RecognizerIntent;
 
 import java.io.File;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.lang.reflect.Method;
@@ -109,6 +111,11 @@ public class MainActivity extends Activity implements LocationListener {
     private WifiManager wifiManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService rootPowerExecutor = Executors.newSingleThreadExecutor();
+    private final Object rootShellLock = new Object();
+    private Process rootShellProcess;
+    private BufferedWriter rootShellWriter;
+    private BufferedReader rootShellReader;
+    private int rootShellCommandId = 0;
     private volatile boolean rootPowerAvailable = false;
     private volatile int lastSlateMode = -1;
     private Boolean lastChargingState = null;
@@ -453,6 +460,7 @@ public class MainActivity extends Activity implements LocationListener {
             try { shutdownPlayer.release(); } catch (Exception ignored) { }
             shutdownPlayer = null;
         }
+        closeRootShell();
         try { rootPowerExecutor.shutdownNow(); } catch (Exception ignored) { }
     }
 
@@ -763,29 +771,96 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private RootCommandResult runRootCommand(String command) {
-        Process process = null;
-        BufferedReader reader = null;
-        try {
-            process = Runtime.getRuntime().exec(new String[]{"su", "-c", command + " 2>&1"});
-            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            StringBuilder output = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (output.length() > 0) output.append('\n');
-                output.append(line);
-            }
-            int exit = process.waitFor();
-            return new RootCommandResult(exit == 0, output.toString());
-        } catch (Exception e) {
-            return new RootCommandResult(false, e.getClass().getSimpleName());
-        } finally {
-            if (reader != null) {
-                try { reader.close(); } catch (Exception ignored) { }
-            }
-            if (process != null) {
-                try { process.destroy(); } catch (Exception ignored) { }
+        synchronized (rootShellLock) {
+            try {
+                if (!ensureRootShell()) {
+                    return new RootCommandResult(false, "root shell indisponível");
+                }
+
+                final int commandId = ++rootShellCommandId;
+                final String marker = "__CENTRAL_LITE_RC_" + commandId + "__";
+                StringBuilder output = new StringBuilder();
+
+                rootShellWriter.write(command + " 2>&1
+");
+                rootShellWriter.write("echo " + marker + "$?
+");
+                rootShellWriter.flush();
+
+                String line;
+                while ((line = rootShellReader.readLine()) != null) {
+                    if (line.startsWith(marker)) {
+                        String code = line.substring(marker.length()).trim();
+                        int exit = -1;
+                        try { exit = Integer.parseInt(code); } catch (Exception ignored) { }
+                        return new RootCommandResult(exit == 0, output.toString());
+                    }
+                    if (output.length() > 0) output.append('
+');
+                    output.append(line);
+                }
+
+                closeRootShellLocked();
+                return new RootCommandResult(false, output.toString());
+            } catch (Exception e) {
+                closeRootShellLocked();
+                return new RootCommandResult(false, e.getClass().getSimpleName());
             }
         }
+    }
+
+    private boolean ensureRootShell() {
+        synchronized (rootShellLock) {
+            if (rootShellProcess != null && rootShellWriter != null && rootShellReader != null) {
+                try {
+                    rootShellProcess.exitValue();
+                    // If exitValue() succeeds, the old shell has ended.
+                    closeRootShellLocked();
+                } catch (IllegalThreadStateException stillRunning) {
+                    return true;
+                } catch (Exception ignored) {
+                    closeRootShellLocked();
+                }
+            }
+
+            try {
+                ProcessBuilder builder = new ProcessBuilder("su");
+                builder.redirectErrorStream(true);
+                rootShellProcess = builder.start();
+                rootShellWriter = new BufferedWriter(
+                        new OutputStreamWriter(rootShellProcess.getOutputStream()));
+                rootShellReader = new BufferedReader(
+                        new InputStreamReader(rootShellProcess.getInputStream()));
+                return true;
+            } catch (Exception e) {
+                closeRootShellLocked();
+                return false;
+            }
+        }
+    }
+
+    private void closeRootShell() {
+        synchronized (rootShellLock) {
+            closeRootShellLocked();
+        }
+    }
+
+    private void closeRootShellLocked() {
+        try {
+            if (rootShellWriter != null) {
+                rootShellWriter.write("exit
+");
+                rootShellWriter.flush();
+            }
+        } catch (Exception ignored) { }
+
+        try { if (rootShellWriter != null) rootShellWriter.close(); } catch (Exception ignored) { }
+        try { if (rootShellReader != null) rootShellReader.close(); } catch (Exception ignored) { }
+        try { if (rootShellProcess != null) rootShellProcess.destroy(); } catch (Exception ignored) { }
+
+        rootShellWriter = null;
+        rootShellReader = null;
+        rootShellProcess = null;
     }
 
     private boolean outputEndsWithState(String output, int target) {
