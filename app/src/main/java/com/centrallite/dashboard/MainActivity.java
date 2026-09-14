@@ -540,9 +540,13 @@ public class MainActivity extends Activity implements LocationListener {
             lp.screenBrightness = 0.01f;
             getWindow().setAttributes(lp);
         } catch (Exception ignored) { }
+        // Keep Central Lite as the foreground/home task. Do NOT move the task to the
+        // background, because that exposes Samsung's normal Android launcher while parked.
+        // With root we ask Android to sleep the display directly; if that fails, the
+        // already-dimmed screen will still turn off using the normal system timeout.
         handler.postDelayed(new Runnable() {
             @Override public void run() {
-                try { moveTaskToBack(true); } catch (Exception ignored) { }
+                if (parkingMode) requestRootScreenSleep();
             }
         }, 700);
     }
@@ -606,6 +610,10 @@ public class MainActivity extends Activity implements LocationListener {
         syncLinkConnected = true;
         long now = SystemClock.uptimeMillis();
         lastStartupSequenceAt = now;
+
+        // Wake the display directly from root first. This preserves Central Lite as the
+        // foreground task and avoids flashing Samsung's launcher during ignition wake-up.
+        requestRootScreenWake();
 
         try {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
@@ -730,6 +738,28 @@ public class MainActivity extends Activity implements LocationListener {
         } catch (Exception e) {
             if (callback != null) callback.onComplete(false, lastSlateMode);
         }
+    }
+
+    private void requestRootScreenSleep() {
+        try {
+            rootPowerExecutor.execute(new Runnable() {
+                @Override public void run() {
+                    // KEYCODE_SLEEP (223) sleeps without toggling the screen back on.
+                    runRootCommand("input keyevent 223");
+                }
+            });
+        } catch (Exception ignored) { }
+    }
+
+    private void requestRootScreenWake() {
+        try {
+            rootPowerExecutor.execute(new Runnable() {
+                @Override public void run() {
+                    // KEYCODE_WAKEUP (224) wakes without toggling an already-awake display off.
+                    runRootCommand("input keyevent 224");
+                }
+            });
+        } catch (Exception ignored) { }
     }
 
     private RootCommandResult runRootCommand(String command) {
