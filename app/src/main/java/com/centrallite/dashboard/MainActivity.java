@@ -781,10 +781,8 @@ public class MainActivity extends Activity implements LocationListener {
                 final String marker = "__CENTRAL_LITE_RC_" + commandId + "__";
                 StringBuilder output = new StringBuilder();
 
-                rootShellWriter.write(command + " 2>&1
-");
-                rootShellWriter.write("echo " + marker + "$?
-");
+                rootShellWriter.write(command + " 2>&1\n");
+                rootShellWriter.write("echo " + marker + "$?\n");
                 rootShellWriter.flush();
 
                 String line;
@@ -795,8 +793,7 @@ public class MainActivity extends Activity implements LocationListener {
                         try { exit = Integer.parseInt(code); } catch (Exception ignored) { }
                         return new RootCommandResult(exit == 0, output.toString());
                     }
-                    if (output.length() > 0) output.append('
-');
+                    if (output.length() > 0) output.append('\n');
                     output.append(line);
                 }
 
@@ -848,8 +845,7 @@ public class MainActivity extends Activity implements LocationListener {
     private void closeRootShellLocked() {
         try {
             if (rootShellWriter != null) {
-                rootShellWriter.write("exit
-");
+                rootShellWriter.write("exit\n");
                 rootShellWriter.flush();
             }
         } catch (Exception ignored) { }
