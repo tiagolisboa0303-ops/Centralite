@@ -107,6 +107,7 @@ public class MainActivity extends Activity implements LocationListener {
     private LocationManager locationManager;
     private BroadcastReceiver batteryReceiver;
     private BroadcastReceiver bluetoothReceiver;
+    private BroadcastReceiver externalPowerReceiver;
     private BluetoothAdapter bluetoothAdapter;
     private WifiManager wifiManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -129,6 +130,7 @@ public class MainActivity extends Activity implements LocationListener {
     private long lastShutdownSequenceAt = 0L;
     private MediaPlayer shutdownPlayer;
     private boolean parkingMode = false;
+    private boolean parkingShouldDisableCharging = false;
     private long lastStartupSequenceAt = 0L;
     private boolean resumeChromeOnNextReturn = false;
     private boolean greetingWaitingForSync = false;
@@ -161,6 +163,9 @@ public class MainActivity extends Activity implements LocationListener {
     private final Runnable noSyncParkingRunnable = new Runnable() {
         @Override public void run() {
             if (!syncLinkConnected && !driveSessionActive) {
+                // No SYNC on a cold start may simply mean wall charging.
+                // Enter low-power standby, but keep charging enabled.
+                parkingShouldDisableCharging = false;
                 enterParkingMode();
             }
         }
@@ -215,6 +220,7 @@ public class MainActivity extends Activity implements LocationListener {
         setupNewPipeInstallerReceivers();
         startBluetoothMonitor();
         startBatteryMonitor();
+        startExternalPowerMonitor();
         startGps();
 
         // Root power control: on every app start/reboot, fail safe to normal charging.
@@ -335,6 +341,50 @@ public class MainActivity extends Activity implements LocationListener {
         registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
     }
 
+    private void startExternalPowerMonitor() {
+        externalPowerReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (intent == null) return;
+                if (Intent.ACTION_POWER_CONNECTED.equals(intent.getAction())) {
+                    // A physical cable reconnect is an explicit request to charge.
+                    // The Fusion outlet remaining continuously powered after ignition-off
+                    // does not emit a new CONNECTED event, so the normal parked-car ECO
+                    // behavior is preserved.
+                    parkingShouldDisableCharging = false;
+                    setSlateModeAsync(false, false, null);
+                    handler.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            setSlateModeAsync(false, false, null);
+                        }
+                    }, 1200);
+                }
+            }
+        };
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_POWER_CONNECTED);
+        filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        registerReceiver(externalPowerReceiver, filter);
+    }
+
+    /**
+     * Android 5.1 helper for old Waze builds.
+     * Forces High Accuracy (GPS + network) through the rooted system setting and
+     * keeps Central Lite's GPS listener alive while navigation is open.
+     */
+    private void ensureNavigationLocationReady() {
+        if (locationManager != null) {
+            try { requestLocationUpdates(); } catch (Exception ignored) { }
+        }
+        try {
+            rootPowerExecutor.execute(new Runnable() {
+                @Override public void run() {
+                    runRootCommand("settings put secure location_mode 3");
+                }
+            });
+        } catch (Exception ignored) { }
+    }
+
     private void startBluetoothMonitor() {
         bluetoothReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
@@ -437,6 +487,9 @@ public class MainActivity extends Activity implements LocationListener {
         if (bluetoothReceiver != null) {
             try { unregisterReceiver(bluetoothReceiver); } catch (Exception ignored) { }
         }
+        if (externalPowerReceiver != null) {
+            try { unregisterReceiver(externalPowerReceiver); } catch (Exception ignored) { }
+        }
         if (newPipeDownloadReceiver != null) {
             try { unregisterReceiver(newPipeDownloadReceiver); } catch (Exception ignored) { }
         }
@@ -481,6 +534,7 @@ public class MainActivity extends Activity implements LocationListener {
             carMotion.startHazardAnimation();
         }
         playShutdownChime();
+        parkingShouldDisableCharging = true;
         scheduleParkingMode();
     }
 
@@ -494,17 +548,21 @@ public class MainActivity extends Activity implements LocationListener {
         if (parkingMode) return;
         parkingMode = true;
 
-        // Rooted SM-T280: disconnect the battery charger in Samsung Slate Mode.
-        // If root/policy fails, the helper immediately falls back to Slate Mode 0
-        // so the tablet is never accidentally left unable to charge.
-        setSlateModeAsync(true, true, new RootPowerCallback() {
-            @Override public void onComplete(boolean success, int state) {
-                if (dashboard != null && parkingMode) {
-                    dashboard.syncStatus = success ? "Standby SYNC • ECO" : "Standby • carga ON";
-                    dashboard.invalidate();
+        // Cut charging only after a confirmed end of a driving session.
+        // If the app simply starts without SYNC (for example on a wall charger),
+        // charging remains enabled while screen/Wi-Fi/GPS enter low-power standby.
+        if (parkingShouldDisableCharging) {
+            setSlateModeAsync(true, true, new RootPowerCallback() {
+                @Override public void onComplete(boolean success, int state) {
+                    if (dashboard != null && parkingMode) {
+                        dashboard.syncStatus = success ? "Standby SYNC • ECO" : "Standby • carga ON";
+                        dashboard.invalidate();
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            setSlateModeAsync(false, false, null);
+        }
 
         // Stop the work that matters most for battery drain while the car is parked.
         try {
@@ -572,6 +630,12 @@ public class MainActivity extends Activity implements LocationListener {
         } catch (Exception ignored) { }
 
         if (!wasParking) return;
+
+        if (syncLinkConnected) {
+            parkingShouldDisableCharging = false;
+            setSlateModeAsync(false, false, null);
+            ensureNavigationLocationReady();
+        }
 
         if (dashboard != null) dashboard.startAnimations();
         if (carMotion != null) carMotion.startAnimations();
@@ -911,6 +975,8 @@ public class MainActivity extends Activity implements LocationListener {
 
     private void onSyncConnectedForIgnition() {
         syncLinkConnected = true;
+        parkingShouldDisableCharging = false;
+        ensureNavigationLocationReady();
         handler.removeCallbacks(syncDisconnectParkingRunnable);
         handler.removeCallbacks(noSyncParkingRunnable);
         if (dashboard != null) {
@@ -1664,6 +1730,7 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void launchWazeDestination(final String destination) {
+        ensureNavigationLocationReady();
         if (!isWazeInstalled()) {
             showWazeInstallDialog();
             return;
@@ -1687,7 +1754,7 @@ public class MainActivity extends Activity implements LocationListener {
                     connection = (HttpURLConnection) url.openConnection();
                     connection.setConnectTimeout(7000);
                     connection.setReadTimeout(7000);
-                    connection.setRequestProperty("User-Agent", "CentralLite/1.6 Android");
+                    connection.setRequestProperty("User-Agent", "CentralLite/1.7.5 Android");
                     connection.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
                     connection.connect();
 
@@ -1729,6 +1796,7 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void openWazeCoordinates(double lat, double lon) {
+        ensureNavigationLocationReady();
         if (!isWazeInstalled()) {
             showWazeInstallDialog();
             return;
@@ -1751,6 +1819,7 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void launchWazeApp() {
+        ensureNavigationLocationReady();
         Intent launch = getPackageManager().getLaunchIntentForPackage(WAZE_PACKAGE);
         if (launch != null) {
             try {

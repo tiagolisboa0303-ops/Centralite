@@ -1,19 +1,28 @@
-CENTRAL LITE v1.7.4 - ROOT SEM POPUP REPETIDO
+CENTRAL LITE v1.7.5 - CARGA + GPS/WAZE
 
-Correção principal:
-- A Central Lite abre uma única sessão root persistente por execução do app.
-- Os comandos de carga, tela e magiskpolicy reutilizam a mesma sessão.
-- Isso evita abrir vários processos "su" a cada conexão/desconexão do SYNC.
-- O Magisk deve pedir autorização apenas na primeira vez após abrir/reiniciar o app
-  (e, se configurado como acesso permanente, não deverá repetir).
+CORREÇÕES
 
-Upload:
-1) Extraia este ZIP.
-2) Envie o conteúdo para a RAIZ do repositório Centralite.
-3) Substitua os arquivos existentes.
-4) Faça commit na branch main.
-5) Aguarde o workflow "Build Central Lite APK".
+1. CARREGAMENTO
+- Tomada comum: a Central não corta mais a carga apenas por não encontrar SYNC.
+- Reconexão física do cabo: restaura Slate Mode 0 (carga ligada).
+- SYNC conectado / carro ligado: força carga ligada.
+- Corte de carga permanece somente depois de uma sessão de carro confirmada:
+  SYNC estava conectado e desapareceu pelo tempo de segurança.
 
-No tablet, na primeira solicitação do Magisk para a Central Lite:
-- toque em CONCEDER / GRANT;
-- se houver opção de duração, selecione PARA SEMPRE / FOREVER.
+2. WAZE / GPS
+- Antes de abrir o Waze e ao conectar no SYNC, força o Android 5.1 para
+  localização em Alta Precisão (location_mode=3).
+- Mantém o GPS da Central ativo enquanto o Waze está aberto.
+- Pesquisa de destino e demais funções permanecem iguais.
+
+3. SEM ALTERAÇÃO
+- Bluetooth
+- Internet/Wi-Fi
+- Layout
+- Música
+- Voz
+- Demais configurações
+
+UPLOAD
+Extraia o ZIP e envie todo o conteúdo para a RAIZ do repositório Centralite,
+substituindo os arquivos existentes. Depois faça Commit na branch main.
