@@ -1,28 +1,39 @@
-CENTRAL LITE v1.7.5 - CARGA + GPS/WAZE
+CENTRAL LITE v1.9.0 - NAVEGAÇÃO ONLINE + SPOTIFY VIA SYNC
 
-CORREÇÕES
+BASE
+Esta versão volta à base estável da v1.7.5.
+Carregamento, bateria, Ford SYNC, Wi-Fi, modo ECO e layout principal foram preservados.
 
-1. CARREGAMENTO
-- Tomada comum: a Central não corta mais a carga apenas por não encontrar SYNC.
-- Reconexão física do cabo: restaura Slate Mode 0 (carga ligada).
-- SYNC conectado / carro ligado: força carga ligada.
-- Corte de carga permanece somente depois de uma sessão de carro confirmada:
-  SYNC estava conectado e desapareceu pelo tempo de segurança.
+NAVEGAÇÃO ONLINE
+- O botão Destino agora é NAVEGAR / ONLINE.
+- Digite o destino dentro da Central Lite.
+- A busca do destino usa OpenStreetMap/Nominatim somente quando você solicita uma busca.
+- A rota de carro é calculada online pelo OSRM.
+- A linha da rota aparece no próprio mini-mapa.
+- O GPS do tablet continua acompanhando o carro.
+- Se o tablet detectar que saiu mais de ~180 m da linha da rota, tenta recalcular
+  automaticamente, respeitando intervalo mínimo para não sobrecarregar o serviço.
+- Se uma rota estiver ativa, o diálogo oferece ENCERRAR ROTA.
+- Toque longo em NAVEGAR continua abrindo o Waze antigo como emergência.
 
-2. WAZE / GPS
-- Antes de abrir o Waze e ao conectar no SYNC, força o Android 5.1 para
-  localização em Alta Precisão (location_mode=3).
-- Mantém o GPS da Central ativo enquanto o Waze está aberto.
-- Pesquisa de destino e demais funções permanecem iguais.
+SPOTIFY
+- O Spotify roda no iPhone.
+- O iPhone envia o áudio diretamente ao Ford SYNC por Bluetooth.
+- O botão SPOTIFY da Central mostra o estado e ajuda a conectar ao SYNC.
+- Play/pause/troca de faixa devem ser feitos pelo Ford SYNC/volante ou pelo iPhone.
+- A Central não tenta fingir controle remoto do Spotify do iPhone, pois Bluetooth A2DP/AVRCP
+  no Android 5.1 não oferece uma forma confiável de abrir/controlar remotamente o app no iPhone.
+- Toque longo em SPOTIFY continua abrindo o Chrome.
 
-3. SEM ALTERAÇÃO
-- Bluetooth
-- Internet/Wi-Fi
-- Layout
-- Música
-- Voz
-- Demais configurações
+SERVIÇOS DE MAPA/ROTA
+- Mapa: OpenStreetMap/osmdroid.
+- Geocodificação: Nominatim (uso disparado pelo usuário; sem autocomplete).
+- Roteamento: OSRM.
+- Atribuição OpenStreetMap permanece visível no mapa.
 
 UPLOAD
-Extraia o ZIP e envie todo o conteúdo para a RAIZ do repositório Centralite,
-substituindo os arquivos existentes. Depois faça Commit na branch main.
+1. Extraia este ZIP.
+2. Envie todo o conteúdo para a RAIZ do repositório Centralite.
+3. Substitua os arquivos existentes.
+4. Faça Commit na branch main.
+5. Aguarde o workflow Build Central Lite APK.

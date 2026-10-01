@@ -15,8 +15,8 @@ android {
         applicationId "com.centrallite.dashboard"
         minSdk 21
         targetSdk 28
-        versionCode 22
-        versionName "1.7.5"
+        versionCode 25
+        versionName "1.9.0"
     }
 }
 

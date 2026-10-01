@@ -83,6 +83,7 @@ import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
 import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
+import org.osmdroid.views.overlay.Polyline;
 
 public class MainActivity extends Activity implements LocationListener {
     private static final String WAZE_PACKAGE = "com.waze";
@@ -102,6 +103,16 @@ public class MainActivity extends Activity implements LocationListener {
     private boolean musicPanelVisible = false;
     private MapView miniMap;
     private Marker mapMarker;
+    private Polyline routeLine;
+    private Marker routeDestinationMarker;
+    private final ArrayList<GeoPoint> routePoints = new ArrayList<GeoPoint>();
+    private Location latestLocation;
+    private boolean navigationActive = false;
+    private double navigationDestinationLat = 0d;
+    private double navigationDestinationLon = 0d;
+    private String navigationDestinationName = "";
+    private long lastRouteCheckAt = 0L;
+    private long lastRerouteAt = 0L;
     private TextView speedBadge;
     private boolean mapCentered = false;
     private LocationManager locationManager;
@@ -433,12 +444,16 @@ public class MainActivity extends Activity implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
+        if (location != null) {
+            try { latestLocation = new Location(location); } catch (Exception ignored) { latestLocation = location; }
+        }
         float kmh = location.hasSpeed() ? location.getSpeed() * 3.6f : 0f;
         if (kmh < 1.5f) kmh = 0f;
         dashboard.speed = Math.round(kmh);
         dashboard.gpsStatus = "Conectado";
         if (speedBadge != null) speedBadge.setText(dashboard.speed + " km/h");
         updateMiniMap(location);
+        maybeRerouteNavigation(location);
         dashboard.invalidate();
     }
 
@@ -1068,6 +1083,37 @@ public class MainActivity extends Activity implements LocationListener {
         } catch (Exception ignored) { }
     }
 
+    private void showSpotifySyncDialog() {
+        final boolean connected = syncLinkConnected ||
+                (bluetoothAdapter != null &&
+                        bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP)
+                                == BluetoothProfile.STATE_CONNECTED);
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("Spotify • iPhone + Ford SYNC")
+                .setMessage(connected
+                        ? "SYNC está conectado. Abra o Spotify no iPhone; o áudio vai direto para o carro. Play, pause e troca de faixa podem ser feitos pelo próprio SYNC/volante."
+                        : "Conecte o iPhone ao Ford SYNC por Bluetooth. Depois abra o Spotify no iPhone; o áudio será reproduzido diretamente no sistema do carro.");
+
+        if (!connected) {
+            builder.setPositiveButton("CONECTAR SYNC", new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface dialog, int which) {
+                    autoConnectSync(true);
+                }
+            });
+        } else {
+            builder.setPositiveButton("OK", null);
+        }
+
+        builder.setNeutralButton("BLUETOOTH", new DialogInterface.OnClickListener() {
+            @Override public void onClick(DialogInterface dialog, int which) {
+                try { startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)); }
+                catch (Exception ignored) { }
+            }
+        });
+        builder.setNegativeButton("CANCELAR", null).show();
+    }
+
     private void launchPackage(String pkg, String fallbackUri) {
         Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
         if (launch != null) {
@@ -1536,9 +1582,9 @@ public class MainActivity extends Activity implements LocationListener {
         String cmd = normalizeCommand(spoken);
         if (cmd.startsWith("ir para ") || cmd.startsWith("navegar para ") || cmd.startsWith("levar para ")) {
             String destination = spoken.replaceFirst("(?i)^(ir para|navegar para|levar para)\\s+", "").trim();
-            if (destination.length() > 0) launchWazeDestination(destination);
+            if (destination.length() > 0) startInternalNavigation(destination);
             else showDestinationDialog();
-        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("waze") || cmd.contains("navegador")) {
+        } else if (cmd.contains("abrir mapa") || cmd.contains("abrir navegacao") || cmd.equals("mapas") || cmd.contains("navegador")) {
             showDestinationDialog();
         } else if (cmd.contains("internet") || cmd.contains("wifi") || cmd.contains("wi fi") || cmd.contains("buscar rede")) {
             openWifiNetworks();
@@ -1556,7 +1602,9 @@ public class MainActivity extends Activity implements LocationListener {
             dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE);
         } else if (cmd.contains("continuar musica") || cmd.contains("tocar musica") || cmd.equals("tocar")) {
             dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
-        } else if (cmd.contains("abrir musica") || cmd.contains("youtube") || cmd.contains("newpipe")) {
+        } else if (cmd.contains("spotify") || cmd.contains("abrir musica")) {
+            showSpotifySyncDialog();
+        } else if (cmd.contains("youtube") || cmd.contains("newpipe")) {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
             installOrLaunchNewPipe(null);
         } else if (cmd.contains("abrir chrome") || cmd.contains("google")) {
@@ -1661,10 +1709,6 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void launchNavigator() {
-        if (!isWazeInstalled()) {
-            showWazeInstallDialog();
-            return;
-        }
         showDestinationDialog();
     }
 
@@ -1707,26 +1751,269 @@ public class MainActivity extends Activity implements LocationListener {
         box.addView(input, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Para onde vamos?")
-                .setMessage("Digite um endereço, cidade ou local. A Central localiza e envia o destino ao Waze.")
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("Navegação online")
+                .setMessage("Digite um endereço, cidade ou local. A rota será calculada online e mostrada no mapa da própria Central Lite.")
                 .setView(box)
-                .setPositiveButton("WAZE", new DialogInterface.OnClickListener() {
+                .setPositiveButton("INICIAR ROTA", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
                         String destination = input.getText().toString().trim();
-                        if (destination.length() == 0) launchWazeApp();
-                        else launchWazeDestination(destination);
+                        if (destination.length() == 0) {
+                            Toast.makeText(MainActivity.this, "Digite um destino.", Toast.LENGTH_SHORT).show();
+                        } else {
+                            startInternalNavigation(destination);
+                        }
                     }
                 })
-                .setNeutralButton("MAPA WEB", new DialogInterface.OnClickListener() {
-                    @Override public void onClick(DialogInterface dialog, int which) {
-                        String destination = input.getText().toString().trim();
-                        openGoogleMapsWeb(destination);
+                .setNegativeButton("CANCELAR", null);
+
+        if (navigationActive) {
+            builder.setNeutralButton("ENCERRAR ROTA", new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface dialog, int which) {
+                    stopInternalNavigation();
+                }
+            });
+        }
+
+        builder.create().show();
+    }
+
+    private Location getBestNavigationLocation() {
+        if (latestLocation != null) {
+            try { return new Location(latestLocation); } catch (Exception ignored) { return latestLocation; }
+        }
+        try {
+            if (locationManager != null) {
+                Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                if (gps != null) return gps;
+                Location net = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+                if (net != null) return net;
+            }
+        } catch (Exception ignored) { }
+        return null;
+    }
+
+    private void startInternalNavigation(final String destination) {
+        ensureNavigationLocationReady();
+        final Location origin = getBestNavigationLocation();
+        if (origin == null) {
+            Toast.makeText(this, "Aguardando localização GPS. Tente novamente em alguns segundos.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        Toast.makeText(this, "Localizando destino...", Toast.LENGTH_SHORT).show();
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                HttpURLConnection connection = null;
+                BufferedReader reader = null;
+                try {
+                    String endpoint = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=br&q="
+                            + Uri.encode(destination.trim());
+                    URL url = new URL(endpoint);
+                    connection = (HttpURLConnection) url.openConnection();
+                    connection.setConnectTimeout(8000);
+                    connection.setReadTimeout(8000);
+                    connection.setRequestProperty("User-Agent", "CentralLite/1.9.0 Android-SM-T280");
+                    connection.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
+                    connection.connect();
+
+                    reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
+                    StringBuilder json = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) json.append(line);
+
+                    JSONArray results = new JSONArray(json.toString());
+                    if (results.length() == 0) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                Toast.makeText(MainActivity.this, "Destino não encontrado.", Toast.LENGTH_LONG).show();
+                            }
+                        });
+                        return;
                     }
-                })
-                .setNegativeButton("CANCELAR", null)
-                .create();
-        dialog.show();
+
+                    JSONObject first = results.getJSONObject(0);
+                    final double lat = Double.parseDouble(first.getString("lat"));
+                    final double lon = Double.parseDouble(first.getString("lon"));
+                    final String displayName = first.optString("display_name", destination);
+                    requestOnlineRoute(origin, lat, lon, displayName, false);
+                } catch (Exception e) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            Toast.makeText(MainActivity.this,
+                                    "Não consegui localizar o destino. Verifique a internet.",
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
+                } finally {
+                    try { if (reader != null) reader.close(); } catch (Exception ignored) { }
+                    if (connection != null) connection.disconnect();
+                }
+            }
+        }).start();
+    }
+
+    private void requestOnlineRoute(final Location origin, final double destLat, final double destLon,
+                                    final String destName, final boolean automaticReroute) {
+        if (origin == null) return;
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                HttpURLConnection connection = null;
+                BufferedReader reader = null;
+                try {
+                    String coordinates = origin.getLongitude() + "," + origin.getLatitude() + ";"
+                            + destLon + "," + destLat;
+                    String endpoint = "https://router.project-osrm.org/route/v1/driving/"
+                            + coordinates
+                            + "?overview=full&geometries=geojson&steps=true";
+                    URL url = new URL(endpoint);
+                    connection = (HttpURLConnection) url.openConnection();
+                    connection.setConnectTimeout(10000);
+                    connection.setReadTimeout(12000);
+                    connection.setRequestProperty("User-Agent", "CentralLite/1.9.0 Android-SM-T280");
+                    connection.connect();
+
+                    reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"));
+                    StringBuilder json = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) json.append(line);
+
+                    JSONObject rootJson = new JSONObject(json.toString());
+                    if (!"Ok".equals(rootJson.optString("code"))) throw new IllegalStateException("No route");
+
+                    JSONArray routes = rootJson.getJSONArray("routes");
+                    if (routes.length() == 0) throw new IllegalStateException("No route");
+                    JSONObject route = routes.getJSONObject(0);
+                    final double distanceMeters = route.optDouble("distance", 0d);
+                    final double durationSeconds = route.optDouble("duration", 0d);
+
+                    JSONObject geometry = route.getJSONObject("geometry");
+                    JSONArray coords = geometry.getJSONArray("coordinates");
+                    final ArrayList<GeoPoint> points = new ArrayList<GeoPoint>();
+                    for (int i = 0; i < coords.length(); i++) {
+                        JSONArray pair = coords.getJSONArray(i);
+                        points.add(new GeoPoint(pair.getDouble(1), pair.getDouble(0)));
+                    }
+
+                    if (points.size() < 2) throw new IllegalStateException("Empty route");
+
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            applyOnlineRoute(points, destLat, destLon, destName,
+                                    distanceMeters, durationSeconds, automaticReroute);
+                        }
+                    });
+                } catch (Exception e) {
+                    if (!automaticReroute) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                Toast.makeText(MainActivity.this,
+                                        "Não consegui calcular a rota agora. Verifique a internet.",
+                                        Toast.LENGTH_LONG).show();
+                            }
+                        });
+                    }
+                } finally {
+                    try { if (reader != null) reader.close(); } catch (Exception ignored) { }
+                    if (connection != null) connection.disconnect();
+                }
+            }
+        }).start();
+    }
+
+    private void applyOnlineRoute(ArrayList<GeoPoint> points, double destLat, double destLon,
+                                  String destName, double distanceMeters, double durationSeconds,
+                                  boolean automaticReroute) {
+        if (miniMap == null || points == null || points.size() < 2) return;
+
+        try {
+            if (routeLine != null) miniMap.getOverlays().remove(routeLine);
+            routePoints.clear();
+            routePoints.addAll(points);
+
+            routeLine = new Polyline();
+            routeLine.setPoints(points);
+            routeLine.setColor(Color.rgb(45, 145, 255));
+            routeLine.setWidth(dp(6));
+            miniMap.getOverlays().add(0, routeLine);
+
+            GeoPoint destinationPoint = new GeoPoint(destLat, destLon);
+            if (routeDestinationMarker == null) {
+                routeDestinationMarker = new Marker(miniMap);
+                routeDestinationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+                miniMap.getOverlays().add(routeDestinationMarker);
+            }
+            routeDestinationMarker.setTitle("Destino");
+            routeDestinationMarker.setPosition(destinationPoint);
+
+            navigationActive = true;
+            navigationDestinationLat = destLat;
+            navigationDestinationLon = destLon;
+            navigationDestinationName = destName == null ? "" : destName;
+            lastRerouteAt = SystemClock.uptimeMillis();
+
+            Location current = getBestNavigationLocation();
+            if (current != null) {
+                miniMap.getController().setCenter(
+                        new GeoPoint(current.getLatitude(), current.getLongitude()));
+            }
+            miniMap.getController().setZoom(16.5);
+            miniMap.invalidate();
+
+            if (!automaticReroute) {
+                String km = String.format(new Locale("pt", "BR"), "%.1f km", distanceMeters / 1000d);
+                int minutes = Math.max(1, (int) Math.round(durationSeconds / 60d));
+                Toast.makeText(this, "Rota iniciada • " + km + " • ~" + minutes + " min",
+                        Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(this, "Rota recalculada.", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void maybeRerouteNavigation(Location location) {
+        if (!navigationActive || location == null || routePoints.isEmpty()) return;
+
+        long now = SystemClock.uptimeMillis();
+        if (now - lastRouteCheckAt < 10000L) return;
+        lastRouteCheckAt = now;
+
+        float nearest = Float.MAX_VALUE;
+        float[] result = new float[1];
+        // Sample the route to keep this cheap on the old SM-T280.
+        int stride = Math.max(1, routePoints.size() / 220);
+        for (int i = 0; i < routePoints.size(); i += stride) {
+            GeoPoint p = routePoints.get(i);
+            Location.distanceBetween(location.getLatitude(), location.getLongitude(),
+                    p.getLatitude(), p.getLongitude(), result);
+            if (result[0] < nearest) nearest = result[0];
+        }
+
+        if (nearest > 180f && now - lastRerouteAt > 30000L) {
+            lastRerouteAt = now;
+            Location origin;
+            try { origin = new Location(location); } catch (Exception e) { origin = location; }
+            requestOnlineRoute(origin, navigationDestinationLat, navigationDestinationLon,
+                    navigationDestinationName, true);
+        }
+    }
+
+    private void stopInternalNavigation() {
+        navigationActive = false;
+        routePoints.clear();
+        navigationDestinationName = "";
+        try {
+            if (miniMap != null) {
+                if (routeLine != null) miniMap.getOverlays().remove(routeLine);
+                if (routeDestinationMarker != null) miniMap.getOverlays().remove(routeDestinationMarker);
+                routeLine = null;
+                routeDestinationMarker = null;
+                miniMap.invalidate();
+            }
+        } catch (Exception ignored) { }
+        Toast.makeText(this, "Navegação encerrada.", Toast.LENGTH_SHORT).show();
     }
 
     private void launchWazeDestination(final String destination) {
@@ -1754,7 +2041,7 @@ public class MainActivity extends Activity implements LocationListener {
                     connection = (HttpURLConnection) url.openConnection();
                     connection.setConnectTimeout(7000);
                     connection.setReadTimeout(7000);
-                    connection.setRequestProperty("User-Agent", "CentralLite/1.7.5 Android");
+                    connection.setRequestProperty("User-Agent", "CentralLite/1.9.0 Android");
                     connection.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
                     connection.connect();
 
@@ -2441,12 +2728,12 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.031f);
             text.setColor(Color.WHITE);
-            c.drawText("Destino", cx, r.top + r.height() * 0.78f, text);
+            c.drawText("Navegar", cx, r.top + r.height() * 0.78f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.018f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("Waze", cx, r.top + r.height() * 0.91f, text);
+            c.drawText("Online", cx, r.top + r.height() * 0.91f, text);
         }
 
         private void drawSyncTile(Canvas c, int w, int h) {
@@ -2500,27 +2787,33 @@ public class MainActivity extends Activity implements LocationListener {
             float iw = r.width() * 0.43f;
             float ih = r.height() * 0.29f;
 
-            paint.setColor(Color.rgb(230, 35, 35));
-            c.drawRoundRect(new RectF(cx - iw / 2f, cy - ih / 2f,
-                    cx + iw / 2f, cy + ih / 2f), ih * 0.26f, ih * 0.26f, paint);
-            Path play = new Path();
-            play.moveTo(cx - iw * 0.075f, cy - ih * 0.23f);
-            play.lineTo(cx - iw * 0.075f, cy + ih * 0.23f);
-            play.lineTo(cx + iw * 0.18f, cy);
-            play.close();
-            paint.setColor(Color.WHITE);
-            c.drawPath(play, paint);
+            float sr = Math.min(iw, ih) * 0.58f;
+            paint.setColor(Color.rgb(30, 215, 96));
+            c.drawCircle(cx, cy, sr, paint);
+            stroke.setColor(Color.rgb(8, 18, 12));
+            stroke.setStrokeWidth(Math.max(2f, h * 0.006f));
+            stroke.setStrokeCap(Paint.Cap.ROUND);
+            RectF wave1 = new RectF(cx - sr * 0.62f, cy - sr * 0.35f,
+                    cx + sr * 0.62f, cy + sr * 0.25f);
+            RectF wave2 = new RectF(cx - sr * 0.52f, cy - sr * 0.10f,
+                    cx + sr * 0.52f, cy + sr * 0.38f);
+            RectF wave3 = new RectF(cx - sr * 0.42f, cy + sr * 0.10f,
+                    cx + sr * 0.42f, cy + sr * 0.48f);
+            c.drawArc(wave1, 205, 130, false, stroke);
+            c.drawArc(wave2, 205, 130, false, stroke);
+            c.drawArc(wave3, 205, 130, false, stroke);
+            stroke.setStrokeCap(Paint.Cap.BUTT);
 
             text.setTextAlign(Paint.Align.CENTER);
             text.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.034f);
             text.setColor(Color.WHITE);
-            c.drawText("Música", cx, r.top + r.height() * 0.78f, text);
+            c.drawText("Spotify", cx, r.top + r.height() * 0.78f, text);
 
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.0175f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText("NewPipe", cx, r.top + r.height() * 0.91f, text);
+            c.drawText(syncLinkConnected ? "iPhone • SYNC" : "via SYNC", cx, r.top + r.height() * 0.91f, text);
         }
 
         /** Quick microphone/voice-command tile. */
@@ -2597,8 +2890,11 @@ public class MainActivity extends Activity implements LocationListener {
                 int button = findButtonAt(event.getX(), event.getY());
                 long held = System.currentTimeMillis() - touchDownAt;
                 if (button >= 0 && button == touchDownButton) {
-                    // Segure Música para abrir Chrome. Segure Aplicativos para Configurações.
-                    if (button == 4 && held >= 650) {
+                    // Segure Navegar para abrir o Waze antigo. Segure Spotify para abrir Chrome.
+                    // Segure Aplicativos para Configurações.
+                    if (button == 1 && held >= 650) {
+                        launchWazeApp();
+                    } else if (button == 4 && held >= 650) {
                         launchPackage("com.android.chrome", "https://www.google.com");
                     } else if (button == 6 && held >= 650) {
                         startActivity(new Intent(Settings.ACTION_SETTINGS));
@@ -2634,11 +2930,7 @@ public class MainActivity extends Activity implements LocationListener {
                     startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                     break;
                 case 4:
-                    // NewPipe is the preferred music source because it supports background audio.
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
-                    resumeChromeOnNextReturn = false;
-                    showMusicPanel();
-                    installOrLaunchNewPipe(null);
+                    showSpotifySyncDialog();
                     break;
                 case 5:
                     startVoiceCommand();
