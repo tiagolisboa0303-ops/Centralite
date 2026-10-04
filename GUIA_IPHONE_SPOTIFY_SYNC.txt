@@ -1,0 +1,28 @@
+CENTRAL LITE v1.10.2 — SPOTIFY NO iPHONE + FORD SYNC
+
+OBJETIVO
+O Spotify atualizado roda no iPhone. O áudio é enviado por Bluetooth ao Ford SYNC.
+O tablet continua como painel Central Lite.
+
+AUTOMAÇÃO NO iPHONE (ATALHOS)
+1. Abra o app Atalhos.
+2. Entre em Automação e crie uma automação pessoal.
+3. Escolha o gatilho Bluetooth.
+4. Selecione o dispositivo Ford SYNC do carro.
+5. Adicione a ação Abrir App e escolha Spotify.
+6. Se disponível no seu iPhone, adicione a ação de reprodução de mídia depois de Abrir App.
+7. Configure para executar automaticamente quando o SYNC conectar, se essa opção aparecer.
+
+USO
+- Ligue o carro.
+- O iPhone conecta ao Ford SYNC.
+- A automação abre o Spotify.
+- O áudio sai pelo SYNC.
+- A Central Lite permanece na tela principal.
+
+ATENÇÃO
+Algumas versões do Ford SYNC mantêm somente um dispositivo de áudio Bluetooth ativo por vez.
+Como a Central Lite também usa a conexão do tablet ao SYNC para detectar o carro ligado/desligado,
+faça o primeiro teste sem alterar nenhuma outra configuração. Se o iPhone assumir o áudio e o tablet
+perder completamente a conexão com o SYNC, o modo de ignição da Central poderá precisar de um ajuste
+separado. Esta versão não altera a lógica de bateria/standby que já estava funcionando.

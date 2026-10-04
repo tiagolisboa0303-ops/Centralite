@@ -56,6 +56,8 @@ import android.speech.tts.TextToSpeech;
 import android.speech.RecognizerIntent;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
@@ -86,10 +88,8 @@ import org.osmdroid.views.overlay.Marker;
 
 public class MainActivity extends Activity implements LocationListener {
     private static final String WAZE_PACKAGE = "com.waze";
-    private static final String SPOTIFY_PACKAGE = "com.spotify.music";
-    private static final String SPOTIFY_LEGACY_VERSION = "8.4.94.817";
-    private static final String SPOTIFY_LEGACY_PAGE =
-            "https://www.apkmirror.com/apk/spotify-ab/spotify-music-podcasts/spotify-8-4-94-817-release/spotify-music-and-podcasts-8-4-94-817-2-android-apk-download/";
+    private static final String SPOTIFY_LEGACY_SHA256 =
+            "f78474debe566d14b3c1e1ddf5f5b3e3af05af967209f9fd42afab1ebeb95093";
     private static final String WAZE_COMPAT_PAGE = "https://www.apkmirror.com/apk/waze/waze-gps-maps-traffic-alerts-live-navigation/waze-gps-maps-traffic-alerts-live-navigation-4-89-0-1-release/waze-navigation-live-traffic-4-89-0-1-android-apk-download/";
     private static final String SLATE_MODE_PATH = "/sys/class/power_supply/battery/batt_slate_mode";
     private static final String MAGISK_BATTERY_POLICY =
@@ -1072,59 +1072,46 @@ public class MainActivity extends Activity implements LocationListener {
         } catch (Exception ignored) { }
     }
 
-    private boolean isSpotifyInstalled() {
+    private boolean isSyncAudioConnected() {
         try {
-            getPackageManager().getApplicationInfo(SPOTIFY_PACKAGE, 0);
-            return true;
+            return syncLinkConnected || (bluetoothAdapter != null &&
+                    bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP)
+                            == BluetoothProfile.STATE_CONNECTED);
         } catch (Exception ignored) {
-            return false;
+            return syncLinkConnected;
         }
     }
 
-    private void launchSpotifyLegacy() {
-        if (isSpotifyInstalled()) {
-            try {
-                Intent launch = getPackageManager().getLaunchIntentForPackage(SPOTIFY_PACKAGE);
-                if (launch != null) {
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                            .putString(PREF_LAST_MEDIA, "spotify").apply();
-                    launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-                    startActivity(launch);
-                    return;
-                }
-            } catch (Exception ignored) { }
-        }
-        showSpotifyLegacyInstallDialog();
-    }
+    private void showSpotifyIPhoneSyncDialog() {
+        final boolean syncConnected = isSyncAudioConnected();
 
-    private void showSpotifyLegacyInstallDialog() {
-        new AlertDialog.Builder(this)
-                .setTitle("Spotify para Android 5.1")
-                .setMessage("Para este SM-T280, vamos testar o Spotify " + SPOTIFY_LEGACY_VERSION
-                        + " ARMv7, compatível com Android 4.1+. É uma versão antiga e o login "
-                        + "pode ser recusado pelos servidores atuais do Spotify. Se funcionar, "
-                        + "a Central Lite passa a abrir o Spotify diretamente.")
-                .setPositiveButton("ABRIR DOWNLOAD", new DialogInterface.OnClickListener() {
+        String message;
+        if (syncConnected) {
+            message = "Central Lite está conectada ao Ford SYNC. Para o Spotify atualizado, " +
+                    "use o iPhone: abra o Spotify no iPhone e selecione o Ford SYNC como áudio Bluetooth. " +
+                    "Se o SYNC aceitar somente um dispositivo de áudio por vez, ele pode alternar entre o tablet e o iPhone.";
+        } else {
+            message = "Use o Spotify atualizado no iPhone e conecte o iPhone ao Ford SYNC por Bluetooth. " +
+                    "A Central Lite continua usando o tablet para painel, Wi‑Fi e GPS. " +
+                    "A automação do iPhone pode abrir o Spotify quando o SYNC conectar.";
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("Spotify • iPhone + SYNC")
+                .setMessage(message)
+                .setPositiveButton(syncConnected ? "OK" : "CONECTAR SYNC", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
-                        try {
-                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SPOTIFY_LEGACY_PAGE)));
-                        } catch (Exception e) {
-                            try {
-                                startActivity(new Intent(Intent.ACTION_VIEW,
-                                        Uri.parse("https://www.apkmirror.com/apk/spotify-ab/spotify-music-podcasts/")));
-                            } catch (Exception ignored) { }
-                        }
+                        if (!syncConnected) autoConnectSync(true);
                     }
                 })
-                .setNeutralButton("NEWPIPE", new DialogInterface.OnClickListener() {
+                .setNeutralButton("BLUETOOTH", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int which) {
-                        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                                .putString(PREF_LAST_MEDIA, "newpipe").apply();
-                        installOrLaunchNewPipe(null);
+                        try { startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)); }
+                        catch (Exception ignored) { }
                     }
                 })
-                .setNegativeButton("CANCELAR", null)
-                .show();
+                .setNegativeButton("FECHAR", null);
+        builder.show();
     }
 
     private void launchPackage(String pkg, String fallbackUri) {
@@ -1622,7 +1609,7 @@ public class MainActivity extends Activity implements LocationListener {
         } else if (cmd.contains("continuar musica") || cmd.contains("tocar musica") || cmd.equals("tocar")) {
             dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY);
         } else if (cmd.contains("spotify") || cmd.contains("abrir musica")) {
-            launchSpotifyLegacy();
+            showSpotifyIPhoneSyncDialog();
         } else if (cmd.contains("youtube") || cmd.contains("newpipe")) {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_LAST_MEDIA, "newpipe").apply();
             installOrLaunchNewPipe(null);
@@ -2567,7 +2554,7 @@ public class MainActivity extends Activity implements LocationListener {
             float iw = r.width() * 0.43f;
             float ih = r.height() * 0.29f;
 
-            // Spotify visual for the native legacy-app test.
+            // Spotify visual: playback runs on the iPhone and audio goes to Ford SYNC.
             float sr = Math.min(iw, ih) * 0.58f;
             paint.setColor(Color.rgb(30, 215, 96));
             c.drawCircle(cx, cy, sr, paint);
@@ -2594,7 +2581,7 @@ public class MainActivity extends Activity implements LocationListener {
             text.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL));
             text.setTextSize(h * 0.0175f);
             text.setColor(Color.rgb(190, 195, 202));
-            c.drawText(isSpotifyInstalled() ? "Instalado" : "Android 5.1", cx, r.top + r.height() * 0.91f, text);
+            c.drawText(isSyncAudioConnected() ? "iPhone • SYNC" : "iPhone • Bluetooth", cx, r.top + r.height() * 0.91f, text);
         }
 
         /** Quick microphone/voice-command tile. */
@@ -2712,7 +2699,7 @@ public class MainActivity extends Activity implements LocationListener {
                     break;
                 case 4:
                     resumeChromeOnNextReturn = false;
-                    launchSpotifyLegacy();
+                    showSpotifyIPhoneSyncDialog();
                     break;
                 case 5:
                     startVoiceCommand();

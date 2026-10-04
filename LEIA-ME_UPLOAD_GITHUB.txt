@@ -1,29 +1,28 @@
-CENTRAL LITE v1.10.1 - SPOTIFY EMBUTIDO + PAINEL WAZE
+CENTRAL LITE v1.10.2 — iPHONE/SPOTIFY + PAINEL WAZE
 
-WAZE
-- O antigo mini-mapa foi removido da tela principal.
-- No mesmo espaço existe um painel grande do Waze.
-- Toque no painel para abrir o Waze diretamente.
-- O botão Destino continua disponível para pesquisar e enviar destino ao Waze.
+MANTIDO
+- Correção de carregamento/bateria da base estável.
+- Ford SYNC, Wi‑Fi, modo ECO e restante do painel.
+- Painel grande do Waze no lugar do mini-mapa.
+- Toque no painel Waze abre o Waze diretamente.
 
 SPOTIFY
-- Spotify 8.4.94.817 ARMv7 está EMBUTIDO dentro da Central Lite.
-- Compatibilidade do APK: Android 4.1+ / armeabi-v7a.
-- Ao tocar Spotify pela primeira vez, a Central oferece INSTALAR SPOTIFY.
-- Não abre mais site para baixar.
-- O APK também fica em extras/ para instalação manual.
-- SHA256 do Spotify: f78474debe566d14b3c1e1ddf5f5b3e3af05af967209f9fd42afab1ebeb95093
+- Removido o Spotify antigo embutido, pois o login foi recusado pelos servidores atuais.
+- Spotify agora roda no iPhone.
+- Áudio: iPhone -> Bluetooth -> Ford SYNC.
+- Botão Spotify da Central mostra integração iPhone/SYNC e oferece acesso ao Bluetooth/reconexão.
+- Segurar Spotify mantém NewPipe como alternativa no tablet.
 
-PRESERVADO
-- Carregamento/bateria.
-- Ford SYNC.
-- Wi-Fi/internet.
-- Modo ECO.
-- Demais funções estáveis da v1.7.5.
+IMPORTANTE
+O Ford SYNC pode limitar quantos dispositivos de áudio ficam ativos simultaneamente.
+Teste primeiro se o iPhone consegue assumir o Spotify sem o tablet perder totalmente a conexão
+que a Central Lite usa como sensor de ignição. A lógica de bateria não foi alterada nesta versão.
 
-UPLOAD NO GITHUB
-1. Extraia este ZIP.
-2. Envie todo o conteúdo extraído para a RAIZ do repositório Centralite.
+Veja também: GUIA_IPHONE_SPOTIFY_SYNC.txt
+
+UPLOAD
+1. Extraia o ZIP.
+2. Envie todo o conteúdo para a raiz do repositório Centralite.
 3. Substitua os arquivos existentes.
 4. Faça Commit na branch main.
 5. Aguarde o workflow Build Central Lite APK.
