@@ -1,0 +1,17 @@
+SPOTIFY PARA TESTE NO SAMSUNG SM-T280 / ANDROID 5.1
+
+Versão escolhida para o teste:
+Spotify 8.4.94.817
+Arquitetura: armeabi-v7a (ARMv7)
+Mínimo informado pela fonte: Android 4.1+
+Pacote Android: com.spotify.music
+
+Fonte:
+https://www.apkmirror.com/apk/spotify-ab/spotify-music-podcasts/spotify-8-4-94-817-release/spotify-music-and-podcasts-8-4-94-817-2-android-apk-download/
+
+IMPORTANTE:
+- Na página, escolha a variante armeabi-v7a, NÃO x86.
+- É uma versão antiga. Ela instala no Android 5.1, mas o Spotify pode impedir login/reprodução
+  por política de servidor para clientes antigos.
+- O APK do Spotify não é redistribuído dentro deste ZIP. A Central Lite abre a página de
+  instalação diretamente quando o Spotify não está instalado.
