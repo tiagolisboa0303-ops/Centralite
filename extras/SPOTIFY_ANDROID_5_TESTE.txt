@@ -1,17 +1,15 @@
-SPOTIFY PARA TESTE NO SAMSUNG SM-T280 / ANDROID 5.1
+SPOTIFY EMBUTIDO - CENTRAL LITE v1.10.1
 
-Versão escolhida para o teste:
-Spotify 8.4.94.817
-Arquitetura: armeabi-v7a (ARMv7)
-Mínimo informado pela fonte: Android 4.1+
-Pacote Android: com.spotify.music
+Versão: Spotify 8.4.94.817
+Pacote: com.spotify.music
+ABI: armeabi-v7a
+Compatibilidade declarada do arquivo: minAPI16 (Android 4.1+)
+Tablet alvo: Samsung SM-T280 / Android 5.1 (API 22)
+SHA256: f78474debe566d14b3c1e1ddf5f5b3e3af05af967209f9fd42afab1ebeb95093
+Certificado exibido pelo APK: CN=Spotify, OU=Android, O=Spotify, L=Stockholm, ST=Stockholm, C=SE
 
-Fonte:
-https://www.apkmirror.com/apk/spotify-ab/spotify-music-podcasts/spotify-8-4-94-817-release/spotify-music-and-podcasts-8-4-94-817-2-android-apk-download/
+O APK está embutido em app/src/main/assets/spotify_8.4.94.817_armv7.apk e será incorporado ao APK final da Central Lite pelo build.
 
-IMPORTANTE:
-- Na página, escolha a variante armeabi-v7a, NÃO x86.
-- É uma versão antiga. Ela instala no Android 5.1, mas o Spotify pode impedir login/reprodução
-  por política de servidor para clientes antigos.
-- O APK do Spotify não é redistribuído dentro deste ZIP. A Central Lite abre a página de
-  instalação diretamente quando o Spotify não está instalado.
+Na Central Lite, toque no botão Spotify. Se o Spotify não estiver instalado, escolha INSTALAR SPOTIFY. A Central copia o APK interno para Downloads e abre o instalador do Android.
+
+OBS.: compatibilidade de instalação não garante que servidores atuais do Spotify aceitem login/reprodução em uma versão antiga.

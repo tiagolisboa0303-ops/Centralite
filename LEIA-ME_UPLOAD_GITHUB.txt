@@ -1,36 +1,29 @@
-CENTRAL LITE v1.10.0 - SPOTIFY LEGACY + PAINEL WAZE
-
-BASE
-Base estável da v1.7.5. Carregamento/bateria, Ford SYNC, Wi-Fi, modo ECO e
-demais automações foram preservados.
+CENTRAL LITE v1.10.1 - SPOTIFY EMBUTIDO + PAINEL WAZE
 
 WAZE
-- O mini-mapa da tela inicial foi removido visualmente.
-- No mesmo espaço há agora um painel grande do Waze.
-- Toque no painel Waze -> abre o Waze diretamente.
-- Antes de abrir, a Central mantém a preparação de GPS/Alta Precisão já usada na v1.7.5.
-- O botão Destino na faixa inferior continua disponível para pesquisar/enviar um destino ao Waze.
+- O antigo mini-mapa foi removido da tela principal.
+- No mesmo espaço existe um painel grande do Waze.
+- Toque no painel para abrir o Waze diretamente.
+- O botão Destino continua disponível para pesquisar e enviar destino ao Waze.
 
 SPOTIFY
-- O botão Música virou SPOTIFY.
-- Toque curto: abre com.spotify.music.
-- Se o Spotify não estiver instalado, a Central abre o diálogo da versão de teste:
-  Spotify 8.4.94.817 / ARMv7 / Android 4.1+.
-- Toque longo no Spotify: NewPipe continua disponível como fallback.
-- Comando de voz "Spotify" ou "abrir música": tenta abrir Spotify.
-- "YouTube" ou "NewPipe": continua abrindo NewPipe.
+- Spotify 8.4.94.817 ARMv7 está EMBUTIDO dentro da Central Lite.
+- Compatibilidade do APK: Android 4.1+ / armeabi-v7a.
+- Ao tocar Spotify pela primeira vez, a Central oferece INSTALAR SPOTIFY.
+- Não abre mais site para baixar.
+- O APK também fica em extras/ para instalação manual.
+- SHA256 do Spotify: f78474debe566d14b3c1e1ddf5f5b3e3af05af967209f9fd42afab1ebeb95093
 
-ARQUIVO EXTRA
-Veja extras/SPOTIFY_ANDROID_5_TESTE.txt para a variante correta.
+PRESERVADO
+- Carregamento/bateria.
+- Ford SYNC.
+- Wi-Fi/internet.
+- Modo ECO.
+- Demais funções estáveis da v1.7.5.
 
-AVISO
-O Spotify 8.4.94.817 é compatível tecnicamente com Android 5.1, mas é antigo.
-O servidor atual do Spotify pode recusar login ou reprodução. Este pacote é justamente
-para testar essa possibilidade no SM-T280.
-
-UPLOAD
+UPLOAD NO GITHUB
 1. Extraia este ZIP.
-2. Envie o conteúdo para a RAIZ do repositório Centralite.
+2. Envie todo o conteúdo extraído para a RAIZ do repositório Centralite.
 3. Substitua os arquivos existentes.
-4. Commit na branch main.
-5. Aguarde o GitHub Actions.
+4. Faça Commit na branch main.
+5. Aguarde o workflow Build Central Lite APK.
